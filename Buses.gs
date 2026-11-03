@@ -1,660 +1,1104 @@
+
 /**
- * EitoDiceBanana CPU Simulator
- * Buses & Control Unit Module - Phase 2
+ * EitoDiceBanana - Task 04
+ * Internal/external buses and tri-state buffers.
  *
- * Implements:
- * - Internal Bus (8-bit) connecting Registers and ALU
- * - External Address Bus (8-bit)
- * - External Data Bus (8-bit, bidirectional)
- * - Control Bus (Mem_R, Mem_W, IO_R, IO_W, Clock)
- * - Tri-state buffer emulation (HIGH_Z, ACTIVE, CONTENTION prevention)
- * - Micro-operation definitions for FETCH, DECODE, EXECUTE, STORE
+ * Integration with ControlUnit.gs - Task 05.
+ *
+ * This module owns:
+ * - Bus resolution
+ * - Tri-state buffers
+ * - Bus contention validation
+ * - Bus state
+ * - Visual inspection
+ *
+ * Control words and micro-programs
+ * belong to ControlUnit.gs.
  */
 
 const BUSES_LAYOUT = {
-  sheet: "BUSES",
+  sheet: 'BUSES',
   panels: {
-    internalBusState: "D8",
-    internalBusDriver: "D9",
-    internalBusHex: "D10",
-    internalBusBin: "D11",
-    
-    addressBusState: "D15",
-    addressBusDriver: "D16",
-    addressBusHex: "D17",
-    
-    dataBusState: "D21",
-    dataBusDriver: "D22",
-    dataBusHex: "D23",
-    dataBusDirection: "D24",
-    
-    controlMemR: "K8",
-    controlMemW: "K9",
-    controlIOR: "K10",
-    controlIOW: "K11",
-    
-    cwBinary: "J15",
-    activeSignals: "J17",
-    stepDescription: "J19"
+    internalBusState: 'D8',
+    internalBusDriver: 'D9',
+    internalBusHex: 'D10',
+    internalBusBin: 'D11',
+
+    addressBusState: 'D15',
+    addressBusDriver: 'D16',
+    addressBusHex: 'D17',
+
+    dataBusState: 'D21',
+    dataBusDriver: 'D22',
+    dataBusHex: 'D23',
+    dataBusDirection: 'D24',
+
+    controlMemR: 'K8',
+    controlMemW: 'K9',
+    controlIOR: 'K10',
+    controlIOW: 'K11',
+    clock: 'K12',
+
+    cwBinary: 'J15',
+    activeSignals: 'J17',
+    stepDescription: 'J19',
+
+    internalBuffers: 'B28',
+    addressBuffers: 'B32',
+    dataBuffers: 'B36'
   }
 };
 
-const BUSES_STATE_KEY = "EDB_BUSES_STATE";
+const BUSES_STATE_KEY = 'EDB_BUSES_STATE';
 
-// ============================================
-// CONTROL SIGNALS DEFINITION
-// ============================================
+const BUS_INTERNAL_SOURCES = [
+  'PC', 'IR', 'MAR', 'MDR',
+  'AX', 'BX', 'CX', 'DX',
+  'ALU', 'IMMEDIATE', 'KEYBOARD'
+];
 
-const CONTROL_SIGNALS = [
-  // Internal Bus Transmitters (Enable / Tri-state output)
-  "En_PC", "En_IR", "En_MAR", "En_MDR",
-  "En_AX", "En_BX", "En_CX", "En_DX", "En_ALU",
-
-  // Internal Bus Receivers (Load)
-  "Ld_PC", "Ld_IR", "Ld_MAR", "Ld_MDR",
-  "Ld_AX", "Ld_BX", "Ld_CX", "Ld_DX", "Ld_ALU_A", "Ld_ALU_B",
-
-  // ALU & PC Sequencing
-  "Inc_PC", "ALU_ADD", "ALU_SUB", "ALU_AND", "ALU_OR", "ALU_XOR", "ALU_NOT", "ALU_CMP",
-
-  // External Bus / Memory / IO Control
-  "En_MAR_Ext", "Mem_R", "Mem_W", "IO_R", "IO_W",
-
-  // Halt
-  "HLT"
+const BUS_DATA_SOURCES = [
+  'RAM', 'MDR', 'KEYBOARD', 'CACHE'
 ];
 
 // ============================================
-// TRI-STATE BUFFER & BUS ENGINE
+// BUS STATE
 // ============================================
 
 function defaultBusesState_() {
+  const internal = {};
+  const data = {};
+
+  BUS_INTERNAL_SOURCES.forEach(function(name) {
+    internal[name] = 'ZZZZZZZZ';
+  });
+
+  BUS_DATA_SOURCES.forEach(function(name) {
+    data[name] = 'ZZZZZZZZ';
+  });
+
   return {
-    internal: { state: "HIGH_Z", source: null, value: null },
-    address: { state: "HIGH_Z", source: null, value: null },
-    data: { state: "HIGH_Z", source: null, value: null, direction: "-" },
+    internal: {
+      state: 'HIGH_Z',
+      source: null,
+      value: null
+    },
+
+    address: {
+      state: 'HIGH_Z',
+      source: null,
+      value: null
+    },
+
+    data: {
+      state: 'HIGH_Z',
+      source: null,
+      value: null,
+      direction: '-'
+    },
+
     control: {
       Mem_R: 0,
       Mem_W: 0,
       IO_R: 0,
-      IO_W: 0
+      IO_W: 0,
+      Clock: 0
+    },
+
+    buffers: {
+      internal: internal,
+      address: {
+        MAR: 'ZZZZZZZZ'
+      },
+      data: data
     }
   };
 }
 
 function getBusesState_() {
-  const raw = PropertiesService.getDocumentProperties().getProperty(BUSES_STATE_KEY);
-  if (!raw) return defaultBusesState_();
+  const raw = PropertiesService
+    .getDocumentProperties()
+    .getProperty(BUSES_STATE_KEY);
+
+  if (!raw) {
+    return defaultBusesState_();
+  }
+
   try {
-    return JSON.parse(raw);
-  } catch (e) {
+    return Object.assign(
+      defaultBusesState_(),
+      JSON.parse(raw)
+    );
+  } catch (error) {
     return defaultBusesState_();
   }
 }
 
 function saveBusesState_(state) {
-  PropertiesService.getDocumentProperties().setProperty(BUSES_STATE_KEY, JSON.stringify(state));
-}
-
-function createControlWord_(activeMap) {
-  const signals = activeMap || {};
-  const activeList = [];
-  let binary = "";
-
-  CONTROL_SIGNALS.forEach(sig => {
-    if (signals[sig]) {
-      binary += "1";
-      activeList.push(sig);
-    } else {
-      binary += "0";
-    }
-  });
-
-  return {
-    signals: signals,
-    binary: binary,
-    activeSignals: activeList
-  };
-}
-
-function makeMicroStep_(name, signals, condition) {
-  return {
-    name: name,
-    signals: signals || {},
-    condition: condition || null,
-    captureInstructionByte: false
-  };
-}
-
-function shouldExecuteMicroStep_(microStep) {
-  if (!microStep || !microStep.condition) return true;
-
-  if (microStep.condition === "ZF=1") return getFlag("ZF") === 1;
-  if (microStep.condition === "ZF=0") return getFlag("ZF") === 0;
-
-  return true;
-}
-
-/**
- * Resolves active transmitters and detects Bus Contention on shared buses.
- * Accepts either a controlWord object or a direct signals map.
- */
-function resolveControlBuses_(controlWord, context) {
-  const sig = (controlWord && controlWord.signals) ? controlWord.signals : (controlWord || {});
-  const buses = defaultBusesState_();
-
-  // --- 1. INTERNAL BUS ARBITRATION ---
-  const internalDrivers = [];
-
-  if (sig.En_PC) internalDrivers.push({ name: "PC", value: getRegister("PC") });
-  if (sig.En_IR) internalDrivers.push({ name: "IR", value: getRegister("IR") });
-  if (sig.En_MAR) internalDrivers.push({ name: "MAR", value: getRegister("MAR") });
-  if (sig.En_MDR) internalDrivers.push({ name: "MDR", value: getRegister("MDR") });
-  if (sig.En_AX) internalDrivers.push({ name: "AX", value: getRegister("AX") });
-  if (sig.En_BX) internalDrivers.push({ name: "BX", value: getRegister("BX") });
-  if (sig.En_CX) internalDrivers.push({ name: "CX", value: getRegister("CX") });
-  if (sig.En_DX) internalDrivers.push({ name: "DX", value: getRegister("DX") });
-  if (sig.En_ALU) {
-    const val = context && context.aluResult !== undefined ? context.aluResult : 0;
-    internalDrivers.push({ name: "ALU", value: val });
-  }
-
-  if (internalDrivers.length > 1) {
-    buses.internal.state = "CONTENTION";
-    throw new Error(
-      "BUS CONTENTION on Internal Bus! Multiple transmitters active: " +
-      internalDrivers.map(function(d) { return d.name; }).join(", ")
+  PropertiesService
+    .getDocumentProperties()
+    .setProperty(
+      BUSES_STATE_KEY,
+      JSON.stringify(state)
     );
-  } else if (internalDrivers.length === 1) {
-    buses.internal.state = "ACTIVE";
-    buses.internal.source = internalDrivers[0].name;
-    buses.internal.value = internalDrivers[0].value;
-  } else {
-    buses.internal.state = "HIGH_Z";
-    buses.internal.source = null;
-    buses.internal.value = null;
+}
+
+// ============================================
+// TRI-STATE BUFFERS
+// ============================================
+
+function busBits_(value) {
+  if (!isValidByte(value)) {
+    throw new Error(
+      'Bus driver must provide an 8-bit value.'
+    );
   }
 
-  // --- 2. EXTERNAL ADDRESS BUS ---
-  if (sig.En_MAR || sig.En_MAR_Ext) {
-    buses.address.state = "ACTIVE";
-    buses.address.source = "MAR";
-    buses.address.value = getRegister("MAR");
-  } else {
-    buses.address.state = "HIGH_Z";
+  return value.toString(2).padStart(8, '0');
+}
+
+function busBuffer_(enabled, value) {
+  return enabled
+    ? busBits_(value)
+    : 'ZZZZZZZZ';
+}
+
+function busActive_(source, value, extra) {
+  const bus = {
+    state: 'ACTIVE',
+    source: source,
+    value: value
+  };
+
+  if (extra) {
+    Object.assign(bus, extra);
   }
 
-  // --- 3. EXTERNAL DATA BUS (BIDIRECTIONAL) ---
-  const dataDrivers = [];
-  if (sig.Mem_R) {
-    const addr = getRegister("MAR");
-    dataDrivers.push({ name: "RAM", value: Read(addr), dir: "RAM -> MDR" });
-  }
-  if (sig.Mem_W) {
-    dataDrivers.push({ name: "MDR", value: getRegister("MDR"), dir: "MDR -> RAM" });
+  return bus;
+}
+
+// ============================================
+// BUS ARBITRATION
+// ============================================
+
+function resolveControlBuses_(word, context) {
+  if (!word || !word.signals) {
+    throw new Error(
+      'Bus resolver requires a Control Word.'
+    );
   }
 
-  if (dataDrivers.length > 1) {
-    buses.data.state = "CONTENTION";
-    throw new Error("BUS CONTENTION on External Data Bus! Simultaneous Read and Write.");
-  } else if (dataDrivers.length === 1) {
-    buses.data.state = "ACTIVE";
-    buses.data.source = dataDrivers[0].name;
-    buses.data.value = dataDrivers[0].value;
-    buses.data.direction = dataDrivers[0].dir;
-  } else {
-    buses.data.state = "HIGH_Z";
-    buses.data.direction = "-";
+  validateControlWord_(word);
+
+  const s = word.signals;
+  const ctx = context || {};
+  const buses = defaultBusesState_();
+  const sources = [];
+
+  function source(signal, name, value) {
+    if (!s[signal]) return;
+
+    if (!isValidByte(value)) {
+      throw new Error(
+        name + ' output is not an 8-bit value.'
+      );
+    }
+
+    sources.push({
+      name: name,
+      value: value
+    });
   }
 
-  // --- 4. CONTROL BUS ---
-  buses.control.Mem_R = sig.Mem_R ? 1 : 0;
-  buses.control.Mem_W = sig.Mem_W ? 1 : 0;
-  buses.control.IO_R = sig.IO_R ? 1 : 0;
-  buses.control.IO_W = sig.IO_W ? 1 : 0;
+  // CPU register transmitters
+  source('En_PC', 'PC', getRegister('PC'));
+  source('En_IR', 'IR', getRegister('IR'));
+  source(
+    'En_MAR_Int',
+    'MAR',
+    getRegister('MAR')
+  );
+
+  if (!s.Mem_W) {
+    source(
+      'En_MDR',
+      'MDR',
+      getRegister('MDR')
+    );
+  }
+
+  ['AX', 'BX', 'CX', 'DX'].forEach(
+    function(name) {
+      source(
+        'En_' + name,
+        name,
+        getRegister(name)
+      );
+    }
+  );
+
+  // ALU and immediate transmitters
+  if (s.En_ALU) {
+    source(
+      'En_ALU',
+      'ALU',
+      ctx.aluResult
+    );
+  }
+
+  if (s.En_IMM) {
+    source(
+      'En_IMM',
+      'IMMEDIATE',
+      ctx.immediate
+    );
+  }
+
+  // Keyboard transmitter
+  if (s.En_KBD) {
+    const value =
+      ctx.keyboardValue !== undefined
+        ? ctx.keyboardValue
+        : (
+          Array.isArray(ctx.keyboardQueue) &&
+          ctx.keyboardQueue.length
+            ? ctx.keyboardQueue[0]
+            : undefined
+        );
+
+    source(
+      'En_KBD',
+      'KEYBOARD',
+      value
+    );
+  }
+
+  // Prevent internal bus contention
+  if (sources.length > 1) {
+    throw new Error(
+      'Internal bus contention: ' +
+      sources.map(function(item) {
+        return item.name;
+      }).join(', ')
+    );
+  }
+
+  if (sources.length === 1) {
+    buses.internal = busActive_(
+      sources[0].name,
+      sources[0].value
+    );
+  }
+
+  // Individual internal buffers
+  BUS_INTERNAL_SOURCES.forEach(
+    function(name) {
+      buses.buffers.internal[name] =
+        busBuffer_(
+          buses.internal.source === name,
+          buses.internal.value
+        );
+    }
+  );
+
+  // External address bus
+  if (s.En_MAR) {
+    buses.address = busActive_(
+      'MAR',
+      getRegister('MAR')
+    );
+  }
+
+  buses.buffers.address.MAR = busBuffer_(
+    s.En_MAR,
+    getRegister('MAR')
+  );
+
+  // ==========================================
+  // BIDIRECTIONAL EXTERNAL DATA BUS
+  // ==========================================
+
+  const read = Boolean(s.Mem_R);
+  const write = Boolean(s.Mem_W);
+  const ioRead = Boolean(s.IO_R);
+  const ioWrite = Boolean(s.IO_W);
+
+  const transferCount = [
+    read,
+    write,
+    ioRead,
+    ioWrite
+  ].filter(Boolean).length;
+
+  if (transferCount > 1) {
+    throw new Error(
+      'External data bus contention: ' +
+      'incompatible memory/I/O transfers.'
+    );
+  }
+
+  if (read) {
+    buses.data = busActive_(
+      'RAM',
+      Read(getRegister('MAR')),
+      {
+        direction: 'RAM -> MDR'
+      }
+    );
+
+  } else if (write) {
+    buses.data = busActive_(
+      'MDR',
+      getRegister('MDR'),
+      {
+        direction: 'MDR -> RAM'
+      }
+    );
+
+  } else if (ioRead) {
+    if (!s.En_KBD) {
+      throw new Error(
+        'IO_R requires En_KBD.'
+      );
+    }
+
+    const keyboardValue =
+      ctx.keyboardValue !== undefined
+        ? ctx.keyboardValue
+        : (
+          Array.isArray(ctx.keyboardQueue) &&
+          ctx.keyboardQueue.length
+            ? ctx.keyboardQueue[0]
+            : undefined
+        );
+
+    if (!isValidByte(keyboardValue)) {
+      throw new Error(
+        'Keyboard has no valid byte to transmit.'
+      );
+    }
+
+    buses.data = busActive_(
+      'KEYBOARD',
+      keyboardValue,
+      {
+        direction: 'I/O -> CPU'
+      }
+    );
+
+  } else if (ioWrite) {
+    if (!s.En_MDR) {
+      throw new Error(
+        'IO_W requires En_MDR.'
+      );
+    }
+
+    buses.data = busActive_(
+      'MDR',
+      getRegister('MDR'),
+      {
+        direction: 'CPU -> I/O'
+      }
+    );
+  }
+
+  // Individual external data buffers
+  BUS_DATA_SOURCES.forEach(
+    function(name) {
+      buses.buffers.data[name] =
+        busBuffer_(
+          buses.data.source === name,
+          buses.data.value
+        );
+    }
+  );
+
+  // Control bus state
+  buses.control = {
+    Mem_R: read ? 1 : 0,
+    Mem_W: write ? 1 : 0,
+    IO_R: ioRead ? 1 : 0,
+    IO_W: ioWrite ? 1 : 0,
+    Clock: s.Clock ? 1 : 0
+  };
 
   return buses;
 }
 
-/**
- * Executes a single micro-operation clock pulse.
- */
-function executeMicroOperation_(microStep, microContext) {
-  const cw = createControlWord_(microStep.signals);
-  const context = microContext || {};
-  const changes = [];
-  const buses = resolveControlBuses_(cw, context);
-  const sig = cw.signals;
-
-  // Latch operations from internal bus
-  if (buses.internal.state === "ACTIVE") {
-    const busVal = buses.internal.value;
-
-    if (sig.Ld_MAR) {
-      setRegister("MAR", busVal);
-      changes.push("MAR <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_IR) {
-      setRegister("IR", busVal);
-      changes.push("IR <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_PC) {
-      setRegister("PC", busVal);
-      changes.push("PC <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_AX) {
-      setRegister("AX", busVal);
-      changes.push("AX <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_BX) {
-      setRegister("BX", busVal);
-      changes.push("BX <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_CX) {
-      setRegister("CX", busVal);
-      changes.push("CX <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_DX) {
-      setRegister("DX", busVal);
-      changes.push("DX <- " + byteToHex_(busVal) + "h");
-    }
-    if (sig.Ld_MDR && !sig.Mem_R) {
-      setRegister("MDR", busVal);
-      changes.push("MDR <- " + byteToHex_(busVal) + "h");
-    }
-  }
-
-  // External memory operations
-  if (sig.Mem_R) {
-    const readVal = buses.data.value;
-    if (sig.Ld_MDR) {
-      setRegister("MDR", readVal);
-      changes.push("MDR <- RAM[" + byteToHex_(getRegister("MAR")) + "h] (" + byteToHex_(readVal) + "h)");
-    }
-  }
-
-  if (sig.Mem_W) {
-    const addr = getRegister("MAR");
-    const writeVal = getRegister("MDR");
-    Write(addr, writeVal);
-    changes.push("RAM[" + byteToHex_(addr) + "h] <- " + byteToHex_(writeVal) + "h");
-  }
-
-  // Sequencing
-  if (sig.Inc_PC) {
-    const newPC = (getRegister("PC") + 1) & 0xFF;
-    setRegister("PC", newPC);
-    changes.push("PC++ (" + byteToHex_(newPC) + "h)");
-  }
-
-  saveBusesState_(buses);
-  syncBusesDisplay_(buses, cw, microStep.name);
-
-  return {
-    controlWord: cw,
-    binary: cw.binary,
-    activeSignals: cw.activeSignals,
-    buses: buses,
-    changes: changes,
-    context: context,
-    halt: !!sig.HLT,
-    description: microStep.name
-  };
-}
-
 // ============================================
-// MICRO-PROGRAM GENERATORS
-// ============================================
-
-function getFetchMicroProgram_() {
-  return [
-    makeMicroStep_("FETCH_T0_PC_TO_MAR", { En_PC: 1, Ld_MAR: 1 }),
-    makeMicroStep_("FETCH_T1_MEM_READ", { En_MAR: 1, Mem_R: 1, Ld_MDR: 1 }),
-    makeMicroStep_("FETCH_T2_MDR_TO_IR", { En_MDR: 1, Ld_IR: 1, Inc_PC: 1 })
-  ];
-}
-
-function getInstructionMicroProgram_(decoded) {
-  const steps = [];
-  const reg = decoded.register;
-  const opEn = "En_" + reg;
-  const opLd = "Ld_" + reg;
-
-  switch (decoded.type) {
-    case "HLT":
-      steps.push(makeMicroStep_("EXECUTE_HLT", { HLT: 1 }));
-      break;
-
-    case "MOV_IMM": {
-      steps.push(makeMicroStep_("EXECUTE_MOV_IMM_TRANSFER", {
-        En_MDR: 1,
-        [opLd]: 1
-      }));
-      break;
-    }
-
-    case "MOV_REG": {
-      const srcReg = decodeRegister_(decoded.operand);
-      steps.push(makeMicroStep_("EXECUTE_MOV_REG", {
-        ["En_" + srcReg]: 1,
-        [opLd]: 1
-      }));
-      break;
-    }
-
-    case "LOAD": {
-      steps.push(makeMicroStep_("EXEC_LOAD_ADDR_TO_MAR", { En_MDR: 1, Ld_MAR: 1 }));
-      steps.push(makeMicroStep_("EXEC_LOAD_MEM_READ", { En_MAR: 1, Mem_R: 1, Ld_MDR: 1 }));
-      steps.push(makeMicroStep_("EXEC_LOAD_MDR_TO_REG", { En_MDR: 1, [opLd]: 1 }));
-      break;
-    }
-
-    case "STORE": {
-      const srcReg = decoded.register;
-      steps.push(makeMicroStep_("EXEC_STORE_ADDR_TO_MAR", { En_MDR: 1, Ld_MAR: 1 }));
-      steps.push(makeMicroStep_("EXEC_STORE_REG_TO_MDR", { ["En_" + srcReg]: 1, Ld_MDR: 1 }));
-      steps.push(makeMicroStep_("EXEC_STORE_MEM_WRITE", { En_MAR: 1, Mem_W: 1 }));
-      break;
-    }
-
-    case "ADD":
-    case "SUB":
-    case "CMP":
-    case "AND":
-    case "OR":
-    case "XOR": {
-      const step = makeMicroStep_("EXEC_ALU_" + decoded.type, {
-        [opLd]: decoded.type === "CMP" ? 0 : 1,
-        En_ALU: decoded.type === "CMP" ? 0 : 1
-      });
-      step.aluOp = decoded.type;
-      steps.push(step);
-      break;
-    }
-
-    case "INC": {
-      steps.push(makeMicroStep_("EXEC_INC", { [opEn]: 1, [opLd]: 1, Inc_PC: 0 }));
-      break;
-    }
-
-    case "DEC": {
-      steps.push(makeMicroStep_("EXEC_DEC", { [opEn]: 1, [opLd]: 1 }));
-      break;
-    }
-
-    case "NOT": {
-      steps.push(makeMicroStep_("EXEC_NOT", { [opEn]: 1, [opLd]: 1 }));
-      break;
-    }
-
-    case "JMP": {
-      steps.push(makeMicroStep_("EXEC_JMP", { En_MDR: 1, Ld_PC: 1 }));
-      break;
-    }
-
-    case "JZ": {
-      steps.push(makeMicroStep_("EXEC_JZ", { En_MDR: 1, Ld_PC: 1 }, "ZF=1"));
-      break;
-    }
-
-    case "JNZ": {
-      steps.push(makeMicroStep_("EXEC_JNZ", { En_MDR: 1, Ld_PC: 1 }, "ZF=0"));
-      break;
-    }
-
-    default:
-      throw new Error("No micro-program defined for instruction: " + decoded.type);
-  }
-
-  return steps;
-}
-
-// ============================================
-// VISUAL DASHBOARD & PRESENTATION
+// SHEET ACCESS
 // ============================================
 
 function busesSheet_() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(BUSES_LAYOUT.sheet);
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName(BUSES_LAYOUT.sheet);
+
   if (!sheet) {
-    throw new Error('Sheet "' + BUSES_LAYOUT.sheet + '" not found.');
+    throw new Error(
+      'BUSES sheet not found.'
+    );
   }
+
   return sheet;
 }
 
-/**
- * Initializes the layout of the BUSES sheet non-destructively.
- */
+// ============================================
+// BUSES DASHBOARD
+// ============================================
+
 function renderBusesDashboard() {
-  const sheet = busesSheet_();
+  const sh = busesSheet_();
   const C = CONFIG.COLORS;
 
-  sheet.clear();
-  sheet.getRange("A1:Z50").setBackground(C.background);
+  sh.getRange('A1:T50').breakApart();
+  sh.getRange('A1:T50').clear();
 
-  // Title
-  sheet.getRange("B2:L2").merge()
-    .setValue("EitoDiceBanana — SYSTEM BUSES & TRI-STATE BUFFERS")
-    .setBackground(C.panel)
-    .setFontColor(C.yellow)
-    .setFontWeight("bold")
-    .setFontSize(13)
-    .setHorizontalAlignment("center");
+  sh.getRange('A1:T50')
+    .setBackground(C.background)
+    .setFontColor(C.white)
+    .setFontFamily('Roboto Mono');
 
-  function styleHeader(range, text) {
-    sheet.getRange(range).merge()
+  sh.setHiddenGridlines(true);
+  sh.setColumnWidths(1, 20, 95);
+
+  function header(range, text) {
+    sh.getRange(range)
+      .merge()
       .setValue(text)
-      .setBackground(C.panelAlt)
       .setFontColor(C.yellow)
-      .setFontWeight("bold")
-      .setFontSize(10)
-      .setHorizontalAlignment("left");
+      .setBackground(C.panelAlt)
+      .setFontWeight('bold');
   }
 
-  function styleLabel(cell, text) {
-    sheet.getRange(cell)
+  function label(cell, text) {
+    sh.getRange(cell)
       .setValue(text)
-      .setFontColor(C.muted)
-      .setFontWeight("bold")
-      .setFontSize(9);
+      .setFontColor(C.muted);
   }
 
-  function styleValue(cell) {
-    sheet.getRange(cell)
+  function value(cell) {
+    sh.getRange(cell)
       .setBackground(C.panel)
-      .setFontColor(C.white)
-      .setFontWeight("bold")
-      .setHorizontalAlignment("center");
+      .setFontColor(C.yellow);
   }
 
-  // 1. Internal Bus Panel
-  styleHeader("B6:G6", "1. INTERNAL BUS (8-BIT)");
-  styleLabel("B8", "STATE");   styleValue("D8");
-  styleLabel("B9", "DRIVER");  styleValue("D9");
-  styleLabel("B10", "HEX");    styleValue("D10");
-  styleLabel("B11", "BINARY"); styleValue("D11");
+  header(
+    'B2:R2',
+    'EitoDiceBanana / SYSTEM BUSES & TRI-STATE BUFFERS'
+  );
 
-  // 2. Address Bus Panel
-  styleHeader("B13:G13", "2. EXTERNAL ADDRESS BUS (8-BIT)");
-  styleLabel("B15", "STATE");  styleValue("D15");
-  styleLabel("B16", "DRIVER"); styleValue("D16");
-  styleLabel("B17", "HEX");    styleValue("D17");
+  header(
+    'B6:G6',
+    'INTERNAL BUS (8 BIT)'
+  );
 
-  // 3. Data Bus Panel
-  styleHeader("B19:G19", "3. EXTERNAL DATA BUS (BIDIRECTIONAL)");
-  styleLabel("B21", "STATE");     styleValue("D21");
-  styleLabel("B22", "DRIVER");    styleValue("D22");
-  styleLabel("B23", "HEX");       styleValue("D23");
-  styleLabel("B24", "DIRECTION"); styleValue("D24");
+  [
+    ['B8', 'STATE', 'D8'],
+    ['B9', 'DRIVER', 'D9'],
+    ['B10', 'HEX', 'D10'],
+    ['B11', 'BINARY', 'D11']
+  ].forEach(function(row) {
+    label(row[0], row[1]);
+    value(row[2]);
+  });
 
-  // 4. Control Bus Panel
-  styleHeader("I6:M6", "4. CONTROL BUS SIGNALS");
-  styleLabel("I8", "Mem_R (Read)");   styleValue("K8");
-  styleLabel("I9", "Mem_W (Write)");  styleValue("K9");
-  styleLabel("I10", "IO_R (I/O Read)"); styleValue("K10");
-  styleLabel("I11", "IO_W (I/O Write)"); styleValue("K11");
+  header(
+    'B13:G13',
+    'EXTERNAL ADDRESS BUS (8 BIT)'
+  );
 
-  // 5. Control Word & Step
-  styleHeader("I13:M13", "5. CONTROL UNIT STATUS");
-  styleLabel("I15", "CONTROL WORD"); styleValue("J15");
-  styleLabel("I17", "ACTIVE SIGNALS"); styleValue("J17");
-  styleLabel("I19", "MICRO-STEP"); styleValue("J19");
+  [
+    ['B15', 'STATE', 'D15'],
+    ['B16', 'DRIVER', 'D16'],
+    ['B17', 'HEX', 'D17']
+  ].forEach(function(row) {
+    label(row[0], row[1]);
+    value(row[2]);
+  });
+
+  header(
+    'B19:G19',
+    'BIDIRECTIONAL EXTERNAL DATA BUS (8 BIT)'
+  );
+
+  [
+    ['B21', 'STATE', 'D21'],
+    ['B22', 'DRIVER', 'D22'],
+    ['B23', 'HEX', 'D23'],
+    ['B24', 'DIRECTION', 'D24']
+  ].forEach(function(row) {
+    label(row[0], row[1]);
+    value(row[2]);
+  });
+
+  header(
+    'I6:R6',
+    'CONTROL BUS'
+  );
+
+  [
+    ['I8', 'Mem_R', 'K8'],
+    ['I9', 'Mem_W', 'K9'],
+    ['I10', 'IO_R', 'K10'],
+    ['I11', 'IO_W', 'K11'],
+    ['I12', 'Clock', 'K12']
+  ].forEach(function(row) {
+    label(row[0], row[1]);
+    value(row[2]);
+  });
+
+  header(
+    'I13:R13',
+    'CONTROL WORD / MICRO-STEP'
+  );
+
+  [
+    ['I15', 'WORD', 'J15'],
+    ['I17', 'SIGNALS', 'J17'],
+    ['I19', 'STEP', 'J19']
+  ].forEach(function(row) {
+    label(row[0], row[1]);
+    value(row[2]);
+  });
+
+  header(
+    'B26:R26',
+    'PER-TRANSMITTER TRI-STATE BUFFERS (0 / 1 / Z)'
+  );
+
+  header(
+    'B27:R27',
+    'INTERNAL: PC IR MAR MDR AX BX CX DX ALU IMM KBD'
+  );
+
+  sh.getRange('B28:R30')
+    .merge()
+    .setBackground(C.panel)
+    .setWrap(true)
+    .setFontColor(C.yellow);
+
+  header(
+    'B31:R31',
+    'ADDRESS: MAR'
+  );
+
+  sh.getRange('B32:R33')
+    .merge()
+    .setBackground(C.panel)
+    .setWrap(true)
+    .setFontColor(C.yellow);
+
+  header(
+    'B35:R35',
+    'EXTERNAL DATA: RAM MDR KEYBOARD CACHE'
+  );
+
+  sh.getRange('B36:R38')
+    .merge()
+    .setBackground(C.panel)
+    .setWrap(true)
+    .setFontColor(C.yellow);
+
+  sh.setRowHeights(28, 3, 23);
+  sh.setRowHeights(36, 3, 23);
+
+  syncBusesDisplay_(
+    defaultBusesState_(),
+    createControlWord_({}),
+    'IDLE'
+  );
 
   SpreadsheetApp.flush();
 }
 
-/**
- * Syncs the visual sheet with the latest bus status.
- */
-function syncBusesDisplay_(buses, cw, stepName) {
-  const sheet = busesSheet_();
-  const P = BUSES_LAYOUT.panels;
+// ============================================
+// UPDATE BUSES DISPLAY
+// ============================================
+
+function syncBusesDisplay_(buses, word, stepName) {
+  const sh = busesSheet_();
+  const p = BUSES_LAYOUT.panels;
   const C = CONFIG.COLORS;
 
-  function formatState(cell, state) {
-    const range = sheet.getRange(cell);
-    range.setValue(state);
-    if (state === "ACTIVE") {
-      range.setFontColor(C.green);
-    } else if (state === "CONTENTION") {
-      range.setFontColor(C.red);
-    } else {
-      range.setFontColor(C.muted);
-    }
+  if (
+    sh.getRange('B6').getValue() !==
+    'INTERNAL BUS (8 BIT)'
+  ) {
+    return;
   }
 
-  // Internal Bus
-  formatState(P.internalBusState, buses.internal.state);
-  sheet.getRange(P.internalBusDriver).setValue(buses.internal.source || "-");
-  sheet.getRange(P.internalBusHex).setValue(
-    buses.internal.value !== null ? byteToHex_(buses.internal.value) + "h" : "--"
-  );
-  sheet.getRange(P.internalBusBin).setValue(
-    buses.internal.value !== null ? byteToBinary_(buses.internal.value) : "--------"
-  );
+  const b = buses || defaultBusesState_();
 
-  // Address Bus
-  formatState(P.addressBusState, buses.address.state);
-  sheet.getRange(P.addressBusDriver).setValue(buses.address.source || "-");
-  sheet.getRange(P.addressBusHex).setValue(
-    buses.address.value !== null ? byteToHex_(buses.address.value) + "h" : "--"
-  );
-
-  // Data Bus
-  formatState(P.dataBusState, buses.data.state);
-  sheet.getRange(P.dataBusDriver).setValue(buses.data.source || "-");
-  sheet.getRange(P.dataBusHex).setValue(
-    buses.data.value !== null ? byteToHex_(buses.data.value) + "h" : "--"
-  );
-  sheet.getRange(P.dataBusDirection).setValue(buses.data.direction || "-");
-
-  // Control Lines
-  function styleBit(cell, val) {
-    sheet.getRange(cell)
-      .setValue(val)
-      .setFontColor(val === 1 ? C.green : C.muted);
+  function put(cell, value) {
+    sh.getRange(cell).setValue(value);
   }
-  styleBit(P.controlMemR, buses.control.Mem_R);
-  styleBit(P.controlMemW, buses.control.Mem_W);
-  styleBit(P.controlIOR, buses.control.IO_R);
-  styleBit(P.controlIOW, buses.control.IO_W);
 
-  // Control Word & Microstep
-  if (cw) {
-    sheet.getRange(P.cwBinary).setValue(cw.binary);
-    sheet.getRange(P.activeSignals).setValue(cw.activeSignals.join(", ") || "NONE");
+  function state(cell, value) {
+    sh.getRange(cell)
+      .setValue(value)
+      .setFontColor(
+        value === 'ACTIVE'
+          ? C.green
+          : value === 'CONTENTION'
+            ? C.red
+            : C.muted
+      );
   }
-  if (stepName) {
-    sheet.getRange(P.stepDescription).setValue(stepName);
-  }
-}
 
-function updateControlUnitPanel_(state) {
-  if (!state) return;
-  const sheet = busesSheet_();
-  sheet.getRange(BUSES_LAYOUT.panels.cwBinary).setValue(state.lastControlWord || "--------");
-  sheet.getRange(BUSES_LAYOUT.panels.activeSignals).setValue(
-    (state.lastActiveSignals && state.lastActiveSignals.join(", ")) || "NONE"
+  function hex(value) {
+    return isValidByte(value)
+      ? byteToHex_(value) + 'h'
+      : '--';
+  }
+
+  function bin(value) {
+    return isValidByte(value)
+      ? busBits_(value)
+      : 'ZZZZZZZZ';
+  }
+
+  // Internal bus
+  state(
+    p.internalBusState,
+    b.internal.state
   );
-  sheet.getRange(BUSES_LAYOUT.panels.stepDescription).setValue(state.lastMicroStep || "-");
+
+  put(
+    p.internalBusDriver,
+    b.internal.source || '-'
+  );
+
+  put(
+    p.internalBusHex,
+    hex(b.internal.value)
+  );
+
+  put(
+    p.internalBusBin,
+    bin(b.internal.value)
+  );
+
+  // Address bus
+  state(
+    p.addressBusState,
+    b.address.state
+  );
+
+  put(
+    p.addressBusDriver,
+    b.address.source || '-'
+  );
+
+  put(
+    p.addressBusHex,
+    hex(b.address.value)
+  );
+
+  // Data bus
+  state(
+    p.dataBusState,
+    b.data.state
+  );
+
+  put(
+    p.dataBusDriver,
+    b.data.source || '-'
+  );
+
+  put(
+    p.dataBusHex,
+    hex(b.data.value)
+  );
+
+  put(
+    p.dataBusDirection,
+    b.data.direction || '-'
+  );
+
+  // Control signals
+  [
+    'Mem_R',
+    'Mem_W',
+    'IO_R',
+    'IO_W',
+    'Clock'
+  ].forEach(function(name) {
+    const cellMap = {
+      Mem_R: p.controlMemR,
+      Mem_W: p.controlMemW,
+      IO_R: p.controlIOR,
+      IO_W: p.controlIOW,
+      Clock: p.clock
+    };
+
+    sh.getRange(cellMap[name])
+      .setValue(b.control[name] || 0)
+      .setFontColor(
+        b.control[name]
+          ? C.green
+          : C.muted
+      );
+  });
+
+  // Control Word
+  put(
+    p.cwBinary,
+    word
+      ? (
+        word.binary ||
+        controlWordToBinary_(word)
+      )
+      : '-'
+  );
+
+  put(
+    p.activeSignals,
+    word
+      ? (
+        getActiveControlSignals_(word)
+          .join(', ') || 'NONE'
+      )
+      : 'NONE'
+  );
+
+  put(
+    p.stepDescription,
+    stepName || '-'
+  );
+
+  // Buffer values
+  const groups = b.buffers || {};
+
+  function summary(group) {
+    return Object.keys(group || {})
+      .map(function(name) {
+        return name + ': ' + group[name];
+      })
+      .join('    ') || 'NONE';
+  }
+
+  put(
+    p.internalBuffers,
+    summary(groups.internal)
+  );
+
+  put(
+    p.addressBuffers,
+    summary(groups.address)
+  );
+
+  put(
+    p.dataBuffers,
+    summary(groups.data)
+  );
 }
 
 // ============================================
-// VERIFICATION TESTS FOR TASK 04
+// RESET BUSES
 // ============================================
+
+function resetBusesModule() {
+  const idle = defaultBusesState_();
+
+  saveBusesState_(idle);
+
+  syncBusesDisplay_(
+    idle,
+    createControlWord_({}),
+    'IDLE'
+  );
+
+  return idle;
+}
+
+// ============================================
+// TASK 04 TESTS
+// ============================================
+
+/**
+ * NOTE:
+ * These tests modify CPU registers and RAM[85h].
+ */
 
 function testBusesModule() {
-  Logger.log("=== STARTING TASK 04 BUSES & TRI-STATE TESTS ===");
+  const assert = function(ok, message) {
+    if (!ok) {
+      throw new Error(
+        'TASK 04: ' + message
+      );
+    }
+  };
 
-  // Test 1: High-Z Default
-  const idleCw = createControlWord_({});
-  const idleBuses = resolveControlBuses_(idleCw);
+  Logger.log(
+    '=== TASK 04 BUS TESTS ==='
+  );
 
-  if (
-    idleBuses.internal.state !== "HIGH_Z" ||
-    idleBuses.address.state !== "HIGH_Z" ||
-    idleBuses.data.state !== "HIGH_Z"
-  ) {
-    throw new Error("Default High-Z test failed.");
-  }
-  Logger.log("PASS: Inactive buffers remain in High-Z");
+  // TEST 1: HIGH-Z
+  const idle = resolveControlBuses_(
+    createControlWord_({})
+  );
 
-  // Test 2: Single Driver (AX to Internal Bus)
-  setRegister("AX", 0x42);
-  const axCw = createControlWord_({ En_AX: 1 });
-  const axBuses = resolveControlBuses_(axCw);
+  assert(
+    idle.internal.state === 'HIGH_Z' &&
+    idle.address.state === 'HIGH_Z' &&
+    idle.data.state === 'HIGH_Z',
+    'All idle buses must be HIGH_Z'
+  );
 
-  if (
-    axBuses.internal.state !== "ACTIVE" ||
-    axBuses.internal.source !== "AX"
-  ) {
-    throw new Error("Single driver (AX) test failed.");
-  }
-  Logger.log("PASS: Single transmitter drives Internal Bus (AX = 42h)");
+  Logger.log(
+    'PASS: All idle buses and buffers HIGH_Z'
+  );
 
-  // Test 3: Bus Contention Prevention
-  let contentionCaught = false;
+  // TEST 2: CPU REGISTERS
+  [
+    'AX', 'BX', 'CX', 'DX',
+    'PC', 'IR', 'MDR'
+  ].forEach(function(reg) {
+    setRegister(reg, 0x42);
+
+    const signals = {};
+    signals['En_' + reg] = 1;
+
+    const buses = resolveControlBuses_(
+      createControlWord_({
+        signals: signals
+      })
+    );
+
+    assert(
+      buses.internal.source === reg &&
+      buses.internal.value === 0x42,
+      'Driver ' + reg
+    );
+
+    assert(
+      buses.buffers.internal[reg] ===
+      '01000010',
+      '8-bit driver ' + reg
+    );
+
+    Object.keys(buses.buffers.internal)
+      .filter(function(name) {
+        return name !== reg;
+      })
+      .forEach(function(name) {
+        assert(
+          buses.buffers.internal[name] ===
+          'ZZZZZZZZ',
+          name + ' not HIGH_Z'
+        );
+      });
+  });
+
+  // MAR is also connected internally.
+  setRegister('MAR', 0x42);
+
+  const marInternal = resolveControlBuses_(
+    createControlWord_({
+      signals: {
+        En_MAR_Int: 1
+      }
+    })
+  );
+
+  assert(
+    marInternal.internal.source === 'MAR' &&
+    marInternal.internal.value === 0x42,
+    'MAR must connect to internal bus'
+  );
+
+  Logger.log(
+    'PASS: Eight CPU register drivers including MAR'
+  );
+
+  // TEST 3: CONTENTION
+  let blocked = false;
+
   try {
-    const conflictCw = createControlWord_({ En_AX: 1, En_BX: 1 });
-    resolveControlBuses_(conflictCw);
+    resolveControlBuses_(
+      createControlWord_({
+        signals: {
+          En_AX: 1,
+          En_BX: 1
+        }
+      })
+    );
   } catch (error) {
-    contentionCaught = true;
+    blocked = /contention/i.test(
+      error.message
+    );
   }
 
-  if (!contentionCaught) {
-    throw new Error("Bus Contention test failed: Contention was not prevented/detected.");
-  }
-  Logger.log("PASS: Bus contention prevented when AX and BX enable simultaneously");
+  assert(
+    blocked,
+    'Simultaneous drivers must be rejected'
+  );
 
-  // Test 4: Bidirectional Data Bus
-  setRegister("MAR", 0x85);
-  setRegister("MDR", 0x99);
+  Logger.log(
+    'PASS: Internal bus contention rejected'
+  );
+
+  // TEST 4: BIDIRECTIONAL DATA BUS
+  setRegister('MAR', 0x85);
+  setRegister('MDR', 0x99);
+
   Write(0x85, 0xAA);
 
-  // 4a: Read (MEMORY -> Data Bus)
-  const readCw = createControlWord_({ En_MAR: 1, Mem_R: 1, Ld_MDR: 1 });
-  const readBuses = resolveControlBuses_(readCw);
+  // RAM -> MDR
+  const read = resolveControlBuses_(
+    createControlWord_({
+      signals: {
+        En_MAR: 1,
+        Mem_R: 1,
+        Ld_MDR: 1,
+        Clock: 1
+      }
+    })
+  );
 
-  const sourceRead = String(readBuses.data.source || "").toUpperCase();
-  const validSource = sourceRead === "RAM" || sourceRead === "MEMORY";
-  const validValue = readBuses.data.value === 0xAA || readBuses.data.value === null;
+  assert(
+    read.data.source === 'RAM' &&
+    read.data.value === 0xAA,
+    'RAM -> MDR read bus'
+  );
 
-  if (!validSource || !validValue) {
-    throw new Error("External Data Bus Read test failed.");
-  }
-  Logger.log("PASS: Bidirectional Data Bus Read (MEMORY -> MDR)");
+  assert(
+    read.buffers.data.MDR === 'ZZZZZZZZ',
+    'MDR must not drive read bus'
+  );
 
-  // 4b: Write (MDR -> Data Bus) - Corregido añadiendo En_MDR: 1
-  const writeCw = createControlWord_({ En_MAR: 1, En_MDR: 1, Mem_W: 1 });
-  const writeBuses = resolveControlBuses_(writeCw);
+  // CORRECTION:
+  // A previous Read() may have changed MDR.
+  // Restore the intended write payload.
 
-  const sourceWrite = String(writeBuses.data.source || "").toUpperCase();
-  const validWriteSource = sourceWrite === "MDR";
-  const validWriteValue = writeBuses.data.value === 0x99 || writeBuses.data.value === null;
+  setRegister('MDR', 0x99);
 
-  if (!validWriteSource || !validWriteValue) {
-    throw new Error("External Data Bus Write test failed.");
-  }
-  Logger.log("PASS: Bidirectional Data Bus Write (MDR -> MEMORY)");
+  // MDR -> RAM
+  const write = resolveControlBuses_(
+    createControlWord_({
+      signals: {
+        En_MAR: 1,
+        En_MDR: 1,
+        Mem_W: 1,
+        Clock: 1
+      }
+    })
+  );
 
-  Logger.log("=== ALL TASK 04 BUSES TESTS PASSED ===");
+  Logger.log(
+    'DEBUG MDR=' + getRegister('MDR') +
+    ' | SOURCE=' + write.data.source +
+    ' | VALUE=' + write.data.value
+  );
+
+  assert(
+    write.data.source === 'MDR' &&
+    write.data.value === 0x99,
+    'MDR -> RAM write bus'
+  );
+
+  assert(
+    write.buffers.data.RAM ===
+    'ZZZZZZZZ',
+    'RAM must not drive write bus'
+  );
+
+  Logger.log(
+    'PASS: Bidirectional data bus and per-source High-Z'
+  );
+
+  // TEST 5: CLOCK
+  assert(
+    read.control.Clock === 1 &&
+    read.control.Mem_R === 1,
+    'Clock/Read signals'
+  );
+
+  Logger.log(
+    'PASS: Control lines include Clock'
+  );
+
+  // TEST 6: REGISTER TRANSFER
+  setRegister('AX', 0x5A);
+  setRegister('CX', 0x00);
+
+  const transfer = executeMicroOperation_(
+    makeMicroStep_(
+      'TASK04_AX_TO_CX',
+      {
+        En_AX: 1,
+        Ld_CX: 1
+      }
+    ),
+    {}
+  );
+
+  assert(
+    getRegister('CX') === 0x5A &&
+    transfer.buses.internal.source === 'AX',
+    'AX -> internal bus -> CX transfer'
+  );
+
+  assert(
+    transfer.controlWord.signals.Clock === 1,
+    'Micro-step must assert Clock'
+  );
+
+  Logger.log(
+    'PASS: Complete AX -> CX micro-operation'
+  );
+
+  // TEST 7: MEMORY WRITE
+  setRegister('MAR', 0x85);
+  setRegister('MDR', 0x99);
+
+  executeMicroOperation_(
+    makeMicroStep_(
+      'TASK04_WRITE',
+      {
+        En_MAR: 1,
+        En_MDR: 1,
+        Mem_W: 1
+      }
+    ),
+    {}
+  );
+
+  assert(
+    Read(0x85) === 0x99,
+    'Clocked MDR -> RAM write'
+  );
+
+  // TEST 8: MEMORY READ
+  Write(0x85, 0xAA);
+
+  executeMicroOperation_(
+    makeMicroStep_(
+      'TASK04_READ',
+      {
+        En_MAR: 1,
+        Mem_R: 1,
+        Ld_MDR: 1
+      }
+    ),
+    {}
+  );
+
+  assert(
+    getRegister('MDR') === 0xAA,
+    'Clocked RAM -> MDR read'
+  );
+
+  Logger.log(
+    'PASS: Complete clocked RAM read and write'
+  );
+
+  Logger.log(
+    '=== ALL TASK 04 BUS TESTS PASSED ==='
+  );
+
+  return {
+    passed: true
+  };
 }
