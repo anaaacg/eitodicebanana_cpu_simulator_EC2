@@ -1,12 +1,13 @@
 
 /**
  * EitoDiceBanana CPU Simulator
- * Execution Engine - Phase 1
+ * Execution Engine - Phase 2
  *
  * FETCH -> DECODE -> EXECUTE -> STORE
  *
  * Functional: CPU, RAM, ALU, ASM and visual feedback
- * Reserved: Buses, Cache, MMU, I/O, CX and DX
+ * Registers: AX, BX, CX, DX (8-bit)
+ * Reserved: Buses, Cache, MMU, I/O
  */
 
 const EXECUTION_KEY = "EDB_EXECUTION_STATE";
@@ -169,7 +170,9 @@ function changedFlags_(before) {
 function decodeRegister_(code) {
   const registers = {
     0: "AX",
-    1: "BX"
+    1: "BX",
+    2: "CX",
+    3: "DX"
   };
 
   if (!Object.prototype.hasOwnProperty.call(
@@ -935,4 +938,95 @@ function testFlagsDiagnostics() {
       ? "PASS: Flags and ALU are correct"
       : "FAIL: Check ALU or CPU flag updates"
   );
+}
+
+
+// ============================================
+// PHASE 2 - FOUR REGISTER INTEGRATION TEST
+// ============================================
+
+/**
+ * Tests the full FETCH/DECODE/EXECUTE/STORE pipeline
+ * using AX, BX, CX, DX, ALU, flags and memory.
+ *
+ * NOTE: Replaces the current program in code RAM,
+ * resets CPU registers and clears the execution trace.
+ */
+function testPhase2ExecutionModule() {
+  Logger.log("=== PHASE 2 EXECUTION TEST ===");
+
+  const lines = [
+    "MOV AX, FFh",
+    "MOV BX, 01h",
+    "MOV CX, 02h",
+    "MOV DX, 03h",
+    "ADD AX, BX",
+    "MOV CX, AX",
+    "SUB DX, BX",
+    "OR CX, DX",
+    "STORE [80h], CX",
+    "LOAD BX, [80h]",
+    "CMP BX, DX",
+    "HLT"
+  ];
+
+  const program = assembleProgram(lines);
+  loadProgram(program);
+  resetCpu();
+
+  let state = getExecutionState_();
+  let guard = 0;
+
+  while (!state.halted && guard < 100) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (!state.halted || state.steps !== 48) {
+    throw new Error("HLT or 48-phase execution failed.");
+  }
+  Logger.log("PASS: 48 phases and HLT");
+
+  const expected = { AX: 0, BX: 2, CX: 2, DX: 2 };
+  Object.keys(expected).forEach(name => {
+    const actual = getRegister(name);
+    if (actual !== expected[name]) {
+      throw new Error(
+        name + " expected " + expected[name] + ", got " + actual
+      );
+    }
+  });
+  Logger.log("PASS: AX, BX, CX, DX execute independently");
+
+  if (Read(0x80) !== 2) {
+    throw new Error("RAM[80h] must contain 02h.");
+  }
+  Logger.log("PASS: STORE CX and LOAD BX via RAM[80h]");
+
+  if (
+    getFlag("ZF") !== 1 ||
+    getFlag("CF") !== 0 ||
+    getFlag("SF") !== 0
+  ) {
+    throw new Error("CMP flags are incorrect.");
+  }
+  Logger.log("PASS: ZF=1, CF=0, SF=0");
+
+  if (
+    getRegister("IR") !== ISA.HLT.opcode ||
+    getRegister("PC") !== program.length
+  ) {
+    throw new Error("PC or IR execution state is incorrect.");
+  }
+  Logger.log("PASS: PC and IR after HLT");
+
+  if (
+    !isValidByte(getRegister("MAR")) ||
+    !isValidByte(getRegister("MDR"))
+  ) {
+    throw new Error("MAR or MDR is out of 8-bit range.");
+  }
+  Logger.log("PASS: MAR and MDR remain 8-bit");
+
+  Logger.log("=== ALL PHASE 2 EXECUTION TESTS PASSED ===");
 }
