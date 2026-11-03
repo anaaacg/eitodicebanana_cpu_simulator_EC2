@@ -27,7 +27,8 @@ const CONTROL_WORD_SIGNAL_ORDER = [
   "En_MAR", "Ld_MAR",
 
   // Memory and memory data register
-  "Mem_R", "Mem_W", "Ld_MDR", "En_MDR", "Ld_IR",
+  "Mem_R", "Mem_W", "Ld_MDR", "En_MDR",
+  "En_IR", "Ld_IR",
 
   // General-purpose registers
   "En_AX", "Ld_AX",
@@ -64,13 +65,15 @@ const CONTROL_UNIT_REGISTER_SIGNALS = {
 };
 
 const CONTROL_UNIT_INTERNAL_DRIVERS = [
-  "En_PC", "En_AX", "En_BX", "En_CX", "En_DX",
+  "En_PC", "En_IR",
+  "En_AX", "En_BX", "En_CX", "En_DX",
   "En_MDR", "En_ALU", "En_KBD", "En_IMM"
 ];
 
 const CONTROL_UNIT_INTERNAL_LOADS = [
-  "Ld_PC", "Ld_MAR", "Ld_IR", "Ld_AX", "Ld_BX",
-  "Ld_CX", "Ld_DX", "Ld_ALU_A", "Ld_ALU_B", "Ld_LCD"
+  "Ld_PC", "Ld_MAR", "Ld_MDR", "Ld_IR",
+  "Ld_AX", "Ld_BX", "Ld_CX", "Ld_DX",
+  "Ld_ALU_A", "Ld_ALU_B", "Ld_LCD"
 ];
 
 // ============================================================================
@@ -230,6 +233,7 @@ function validateControlWord_(word) {
     !s.En_BX &&
     !s.En_CX &&
     !s.En_DX &&
+    !s.En_IR &&
     !s.En_ALU &&
     !s.En_KBD &&
     !s.En_IMM
@@ -258,9 +262,32 @@ function validateControlWord_(word) {
     }
   );
 
+    // Only one internal bus transmitter is allowed.
   if (internalDrivers.length > 1) {
     throw new Error(
-      "Internal bus contention: " + internalDrivers.join(", ")
+      "Internal bus contention: " +
+      internalDrivers.join(", ")
+    );
+  }
+
+  // Every internal bus receiver requires a source.
+  // Memory read is the exception because RAM loads MDR
+  // through the external data bus.
+  const activeBusLoads =
+    CONTROL_UNIT_INTERNAL_LOADS.filter(function(signal) {
+      return (
+        s[signal] === 1 &&
+        !(signal === "Ld_MDR" && s.Mem_R === 1)
+      );
+    });
+
+  if (
+    activeBusLoads.length > 0 &&
+    internalDrivers.length === 0
+  ) {
+    throw new Error(
+      "Internal bus load without transmitter: " +
+      activeBusLoads.join(", ")
     );
   }
 
@@ -299,6 +326,7 @@ function resolveControlBuses_(word, context) {
   }
 
   addSource("En_PC", "PC", getRegister("PC"));
+  addSource("En_IR", "IR", getRegister("IR"));
   addSource("En_AX", "AX", getRegister("AX"));
   addSource("En_BX", "BX", getRegister("BX"));
   addSource("En_CX", "CX", getRegister("CX"));
@@ -1026,6 +1054,16 @@ function testControlWordModule() {
   );
 
   assertControlUnit_(
+    CONTROL_WORD_SIGNAL_ORDER.length === 26,
+    "Expected 26 control signals"
+  );
+  
+  assertControlUnit_(
+    word.binary.length === 30,
+    "Control Word must contain 30 bits"
+  );
+
+  assertControlUnit_(
     word.signals.En_PC === 1,
     "En_PC was not activated"
   );
@@ -1075,7 +1113,9 @@ function testControlWordModule() {
 // ============================================================================
 
 function testControlBusContention() {
-  let rejected = false;
+
+  // TEST 1: Reject two simultaneous transmitters.
+  let rejectedContention = false;
 
   try {
     const invalid = createControlWord_({
@@ -1088,52 +1128,98 @@ function testControlBusContention() {
     validateControlWord_(invalid);
 
   } catch (error) {
-    rejected = /contention/i.test(error.message);
+    rejectedContention =
+      /contention/i.test(error.message);
   }
 
   assertControlUnit_(
-    rejected,
-    "Two internal transmitters must cause bus contention"
+    rejectedContention,
+    "Two internal transmitters must cause contention"
   );
 
-  const idle = createControlWord_({});
 
-  const buses = {
-    internalState:
-      idle.signals.En_AX || idle.signals.En_BX
-        ? "ACTIVE"
-        : "HIGH_Z",
+  // TEST 2: Real HIGH-Z bus resolution.
+  const idleWord = createControlWord_({});
 
-    addressState:
-      idle.signals.En_MAR
-        ? "ACTIVE"
-        : "HIGH_Z",
-
-    dataState:
-      idle.signals.Mem_R || idle.signals.Mem_W
-        ? "ACTIVE"
-        : "HIGH_Z"
-  };
-
-  assertControlUnit_(
-    buses.internalState === "HIGH_Z",
-    "Idle internal bus must be HIGH_Z"
+  const buses = resolveControlBuses_(
+    idleWord,
+    {}
   );
 
   assertControlUnit_(
-    buses.addressState === "HIGH_Z",
-    "Idle address bus must be HIGH_Z"
+    buses.internal.state === "HIGH_Z",
+    "Internal bus must be HIGH_Z"
   );
 
   assertControlUnit_(
-    buses.dataState === "HIGH_Z",
-    "Idle data bus must be HIGH_Z"
+    buses.address.state === "HIGH_Z",
+    "Address bus must be HIGH_Z"
   );
+
+  assertControlUnit_(
+    buses.data.state === "HIGH_Z",
+    "Data bus must be HIGH_Z"
+  );
+
+
+  // TEST 3: IR must transmit to the internal bus.
+  const irWord = createControlWord_({
+    signals: {
+      En_IR: 1
+    }
+  });
+
+  const irBus = resolveControlBuses_(
+    irWord,
+    {}
+  );
+
+  assertControlUnit_(
+    irBus.internal.state === "ACTIVE",
+    "IR must activate the internal bus"
+  );
+
+  assertControlUnit_(
+    irBus.internal.source === "IR",
+    "IR must be the active transmitter"
+  );
+
+
+  // TEST 4: Reject a load with no transmitter.
+  let rejectedMissingSource = false;
+
+  try {
+    const invalidLoad = createControlWord_({
+      signals: {
+        Ld_AX: 1
+      }
+    });
+
+    validateControlWord_(invalidLoad);
+
+  } catch (error) {
+    rejectedMissingSource =
+      /without transmitter/i.test(error.message);
+  }
+
+  assertControlUnit_(
+    rejectedMissingSource,
+    "A register load without a transmitter must be rejected"
+  );
+
 
   return {
     passed: true,
-    contentionRejected: rejected,
-    idleBuses: buses
+    contentionRejected: rejectedContention,
+    missingSourceRejected: rejectedMissingSource,
+
+    buses: {
+      internal: buses.internal.state,
+      address: buses.address.state,
+      data: buses.data.state
+    },
+
+    irTransmitter: irBus.internal.source
   };
 }
 
@@ -1141,32 +1227,65 @@ function runControlUnitTests() {
 
   Logger.log("================================");
   Logger.log("CONTROL UNIT - TASK 05");
-  Logger.log("INICIANDO PRUEBAS");
+  Logger.log("STARTING TESTS");
   Logger.log("================================");
 
-  // TEST 1
-  try {
-    const result1 = testControlWordModule();
+  const tests = [
+    {
+      name: "CONTROL WORD",
+      fn: testControlWordModule
+    },
+    {
+      name: "BUS CONTENTION AND HIGH-Z",
+      fn: testControlBusContention
+    }
+  ];
 
-    Logger.log("TEST 1: CONTROL WORD");
-    Logger.log(JSON.stringify(result1, null, 2));
+  const failures = [];
 
-  } catch (error) {
-    Logger.log("ERROR EN TEST 1: " + error.message);
+  tests.forEach(function(test, index) {
+
+    try {
+      const result = test.fn();
+
+      Logger.log(
+        "PASS TEST " + (index + 1) +
+        ": " + test.name
+      );
+
+      Logger.log(
+        JSON.stringify(result, null, 2)
+      );
+
+    } catch (error) {
+
+      failures.push(
+        test.name + ": " + error.message
+      );
+
+      Logger.log(
+        "FAIL TEST " + (index + 1) +
+        ": " + error.message
+      );
+    }
+
+  });
+
+  Logger.log("================================");
+
+  if (failures.length > 0) {
+
+    Logger.log("CONTROL UNIT TESTS FAILED");
+
+    throw new Error(
+      failures.join("\n")
+    );
   }
 
-  // TEST 2
-  try {
-    const result2 = testControlBusContention();
+  Logger.log("ALL CONTROL UNIT TESTS PASSED");
 
-    Logger.log("TEST 2: BUS CONTENTION Y HIGH-Z");
-    Logger.log(JSON.stringify(result2, null, 2));
-
-  } catch (error) {
-    Logger.log("ERROR EN TEST 2: " + error.message);
-  }
-
-  Logger.log("================================");
-  Logger.log("FIN DE LAS PRUEBAS");
-  Logger.log("================================");
+  return {
+    passed: true,
+    totalTests: tests.length
+  };
 }
