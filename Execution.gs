@@ -1,12 +1,13 @@
 
 /**
  * EitoDiceBanana CPU Simulator
- * Execution Engine - Phase 1
+ * Execution Engine - Phase 2
  *
  * FETCH -> DECODE -> EXECUTE -> STORE
  *
  * Functional: CPU, RAM, ALU, ASM and visual feedback
- * Reserved: Buses, Cache, MMU, I/O, CX and DX
+ * Registers: AX, BX, CX, DX (8-bit)
+ * Reserved: Buses, Cache, MMU, I/O
  */
 
 const EXECUTION_KEY = "EDB_EXECUTION_STATE";
@@ -31,7 +32,27 @@ function defaultExecutionState_() {
     paused: false,
     steps: 0,
     instructionPC: 0,
-    lastPhase: "-"
+    lastPhase: "-",
+
+    // Current micro-program and clock position.
+    microProgram: null,
+    microIndex: 0,
+
+    // Context is preserved between STEP presses.
+    microContext: {
+      instructionBytes: []
+    },
+
+    lastInstructionType: "FETCH",
+    lastMicroStep: "-",
+    lastControlWord: "",
+    lastActiveSignals: [],
+    lastBuses: {
+      internal: { state: "HIGH_Z", source: null, value: null },
+      address: { state: "HIGH_Z", source: null, value: null },
+      data: { state: "HIGH_Z", source: null, value: null }
+    },
+    lastChanges: []
   };
 }
 
@@ -40,9 +61,53 @@ function getExecutionState_() {
     .getDocumentProperties()
     .getProperty(EXECUTION_KEY);
 
-  return raw
-    ? JSON.parse(raw)
-    : defaultExecutionState_();
+  if (!raw) {
+    return defaultExecutionState_();
+  }
+
+  const saved = JSON.parse(raw);
+  const state = Object.assign(
+    defaultExecutionState_(),
+    saved
+  );
+
+  // Migrate old states created before micro-step execution.
+  if (!Object.prototype.hasOwnProperty.call(saved, "microIndex")) {
+    state.phase = "FETCH";
+    state.decoded = null;
+    state.result = null;
+    state.microProgram = null;
+    state.microIndex = 0;
+    state.microContext = { instructionBytes: [] };
+    state.lastInstructionType = "FETCH";
+  }
+
+  state.microContext = Object.assign(
+    { instructionBytes: [] },
+    state.microContext || {}
+  );
+
+  if (!Array.isArray(state.microContext.instructionBytes)) {
+    state.microContext.instructionBytes = [];
+  }
+
+  if (!Array.isArray(state.microProgram)) {
+    state.microProgram = null;
+  }
+
+  if (!Number.isInteger(state.microIndex) || state.microIndex < 0) {
+    state.microIndex = 0;
+  }
+
+  if (!Array.isArray(state.lastActiveSignals)) {
+    state.lastActiveSignals = [];
+  }
+
+  if (!Array.isArray(state.lastChanges)) {
+    state.lastChanges = [];
+  }
+
+  return state;
 }
 
 function saveExecutionState_(state) {
@@ -58,6 +123,10 @@ function resetExecutionState() {
   clearRegisterHighlights();
   clearMemoryHighlight();
   updateExecutionVisuals_(state, null, []);
+
+  if (typeof updateControlUnitPanel_ === "function") {
+    updateControlUnitPanel_(state);
+  }
 
   return state;
 }
@@ -169,7 +238,9 @@ function changedFlags_(before) {
 function decodeRegister_(code) {
   const registers = {
     0: "AX",
-    1: "BX"
+    1: "BX",
+    2: "CX",
+    3: "DX"
   };
 
   if (!Object.prototype.hasOwnProperty.call(
@@ -183,97 +254,49 @@ function decodeRegister_(code) {
   return registers[code];
 }
 
-function readInstructionByte_() {
-  const pc = getRegister("PC");
-
-  if (pc > CONFIG.MEMORY.codeEnd) {
-    throw new Error(
-      "PC outside code segment: " + pc
-    );
-  }
-
-  const value = Read(pc);
-
-  setRegister("PC", toByte(pc + 1));
-
-  return value;
-}
-
-function resolveInstructionOperand_(ins) {
-  if (ins.mode === "IMMEDIATE") {
-    return ins.operand;
-  }
-
-  if (ins.mode === "REGISTER") {
-    return getRegister(
-      decodeRegister_(ins.operand)
-    );
-  }
-
-  throw new Error("Invalid addressing mode.");
-}
-
-// ============================================
-// FETCH
-// ============================================
-
-function fetchPhase_(state) {
-  const pc = getRegister("PC");
-
-  if (pc > CONFIG.MEMORY.codeEnd) {
-    throw new Error(
-      "PC outside code segment: " + pc
-    );
-  }
-
-  state.instructionPC = pc;
-
-  setRegister("MAR", pc);
-
-  const opcode = Read(pc);
-
-  setRegister("MDR", opcode);
-  setRegister("IR", opcode);
-  setRegister("PC", toByte(pc + 1));
-
-  state.decoded = null;
-  state.result = null;
-
-  highlightRegisters([
-    "PC", "MAR", "MDR", "IR"
-  ]);
-
-  return (
-    "PC=" + byteToHex_(pc) +
-    "h -> MAR | MDR=" +
-    byteToHex_(opcode) + "h -> IR"
-  );
-}
-
-// ============================================
-// DECODE
-// ============================================
-
-function decodePhase_(state) {
-  const opcode = getRegister("IR");
-  const table = {};
-
-  Object.keys(ISA).forEach(key => {
-    table[ISA[key].opcode] = key;
+/** Returns the mnemonic associated with a machine opcode. */
+function instructionTypeFromOpcode_(opcode) {
+  const type = Object.keys(ISA).find(function(name) {
+    return ISA[name].opcode === opcode;
   });
-
-  const type = table[opcode];
 
   if (!type) {
     throw new Error(
-      "Unknown opcode: " +
-      byteToHex_(opcode) + "h"
+      "Unknown opcode: " + byteToHex_(opcode) + "h"
     );
   }
 
+  return type;
+}
+
+
+/** Builds the decoded instruction from bytes fetched through MDR. */
+function decodeFetchedInstruction_(type, bytes) {
+  const expectedBytes = ISA[type].bytes - 1;
+
+  if (!Array.isArray(bytes) || bytes.length !== expectedBytes) {
+    throw new Error(
+      "Invalid operand byte count for " + type +
+      ": expected " + expectedBytes + ", got " +
+      (Array.isArray(bytes) ? bytes.length : "invalid")
+    );
+  }
+
+  function read(index) {
+    const value = bytes[index];
+
+    if (!isValidByte(value)) {
+      throw new Error(
+        "Invalid instruction byte at operand index " + index
+      );
+    }
+
+    return value;
+  }
+
   const ins = {
-    type,
-    opcode,
+    type: type,
+    opcode: getRegister("IR"),
     register: null,
     mode: null,
     operand: null,
@@ -282,52 +305,37 @@ function decodePhase_(state) {
 
   switch (type) {
     case "MOV_IMM":
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
+      ins.register = decodeRegister_(read(0));
 
-      if (
-        readInstructionByte_() !==
-        ASM_MODES.IMMEDIATE
-      ) {
-        throw new Error(
-          "Invalid MOV immediate mode."
-        );
+      if (read(1) !== ASM_MODES.IMMEDIATE) {
+        throw new Error("Invalid MOV immediate mode.");
       }
 
       ins.mode = "IMMEDIATE";
-      ins.operand = readInstructionByte_();
+      ins.operand = read(2);
       break;
 
     case "MOV_REG":
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
+      ins.register = decodeRegister_(read(0));
       ins.mode = "REGISTER";
-      ins.operand = readInstructionByte_();
+      ins.operand = read(1);
       decodeRegister_(ins.operand);
       break;
 
     case "LOAD":
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
-      ins.address = readInstructionByte_();
+      ins.register = decodeRegister_(read(0));
+      ins.address = read(1);
       break;
 
     case "STORE":
-      ins.address = readInstructionByte_();
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
+      ins.address = read(0);
+      ins.register = decodeRegister_(read(1));
       break;
 
     case "INC":
     case "DEC":
     case "NOT":
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
+      ins.register = decodeRegister_(read(0));
       break;
 
     case "ADD":
@@ -336,272 +344,211 @@ function decodePhase_(state) {
     case "AND":
     case "OR":
     case "XOR": {
-      ins.register = decodeRegister_(
-        readInstructionByte_()
-      );
-
-      const mode = readInstructionByte_();
+      ins.register = decodeRegister_(read(0));
+      const mode = read(1);
 
       if (mode === ASM_MODES.IMMEDIATE) {
         ins.mode = "IMMEDIATE";
       } else if (mode === ASM_MODES.REGISTER) {
         ins.mode = "REGISTER";
       } else {
-        throw new Error(
-          "Invalid addressing mode: " + mode
-        );
+        throw new Error("Invalid addressing mode: " + mode);
       }
 
-      ins.operand = readInstructionByte_();
+      ins.operand = read(2);
 
       if (ins.mode === "REGISTER") {
         decodeRegister_(ins.operand);
       }
-
       break;
     }
 
     case "JMP":
     case "JZ":
     case "JNZ":
-      ins.address = readInstructionByte_();
+      ins.address = read(0);
       break;
 
     case "HLT":
       break;
+
+    default:
+      throw new Error("Unsupported instruction: " + type);
   }
 
-  state.decoded = ins;
-
-  highlightRegisters(["IR", "PC"]);
-
-  return (
-    "Decoded " + type +
-    " | Next PC=" +
-    byteToHex_(getRegister("PC")) + "h"
-  );
+  return ins;
 }
 
-// ============================================
-// EXECUTE
-// ============================================
 
-function executePhase_(state) {
-  const ins = state.decoded;
+/**
+ * Creates one memory-read triplet per instruction operand:
+ * T0: PC -> MAR
+ * T1: RAM[MAR] -> MDR
+ * T2: capture MDR in micro-context and increment PC
+ */
+function getDecodeMicroProgram_(byteCount) {
+  const steps = [];
 
-  if (!ins) {
-    throw new Error(
-      "No decoded instruction."
+  for (let i = 0; i < byteCount; i++) {
+    steps.push(
+      makeMicroStep_("DECODE_T" + i + "_PC_TO_MAR", {
+        En_PC: 1,
+        Ld_MAR: 1
+      })
     );
-  }
 
-  const reg = ins.register;
+    steps.push(
+      makeMicroStep_("DECODE_T" + i + "_MEMORY_READ", {
+        En_MAR: 1,
+        Mem_R: 1,
+        Ld_MDR: 1
+      })
+    );
 
-  if (reg) {
-    highlightRegisters([reg]);
-  } else {
-    clearRegisterHighlights();
-  }
-
-  let detail = ins.type;
-
-  switch (ins.type) {
-    case "MOV_IMM":
-    case "MOV_REG":
-      state.result =
-        resolveInstructionOperand_(ins);
-      break;
-
-    case "ADD":
-      state.result = aluAdd(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "SUB":
-      state.result = aluSub(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "INC":
-      state.result = aluInc(
-        getRegister(reg)
-      );
-      break;
-
-    case "DEC":
-      state.result = aluDec(
-        getRegister(reg)
-      );
-      break;
-
-    case "CMP":
-      aluCmp(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "AND":
-      state.result = aluAnd(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "OR":
-      state.result = aluOr(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "XOR":
-      state.result = aluXor(
-        getRegister(reg),
-        resolveInstructionOperand_(ins)
-      );
-      break;
-
-    case "NOT":
-      state.result = aluNot(
-        getRegister(reg)
-      );
-      break;
-
-    case "LOAD":
-      setRegister("MAR", ins.address);
-      setRegister(
-        "MDR",
-        Read(ins.address)
-      );
-
-      state.result = getRegister("MDR");
-
-      highlightRegisters([
-        "MAR", "MDR", reg
-      ]);
-      break;
-
-    case "STORE":
-      state.result = getRegister(reg);
-
-      highlightRegisters([reg]);
-      break;
-
-    case "JMP":
-      setRegister("PC", ins.address);
-      highlightRegisters(["PC"]);
-      break;
-
-    case "JZ":
-      if (getFlag("ZF") === 1) {
-        setRegister("PC", ins.address);
+    const captureStep = makeMicroStep_(
+      "DECODE_T" + i + "_CAPTURE_BYTE",
+      {
+        En_MDR: 1,
+        Inc_PC: 1
       }
-      highlightRegisters(["PC"]);
-      break;
+    );
 
-    case "JNZ":
-      if (getFlag("ZF") === 0) {
-        setRegister("PC", ins.address);
-      }
-      highlightRegisters(["PC"]);
-      break;
-
-    case "HLT":
-      detail = "HLT detected";
-      break;
+    captureStep.captureInstructionByte = true;
+    steps.push(captureStep);
   }
 
-  if (state.result !== null) {
-    detail +=
-      " | Result=" +
-      byteToHex_(state.result) + "h";
-  }
-
-  if (
-    ["ADD", "SUB", "INC", "DEC",
-     "CMP", "AND", "OR", "XOR", "NOT"]
-      .includes(ins.type)
-  ) {
-    detail +=
-      " | ZF=" + getFlag("ZF") +
-      " CF=" + getFlag("CF") +
-      " SF=" + getFlag("SF");
-  }
-
-  return detail;
+  return steps;
 }
 
-// ============================================
-// STORE / WRITE-BACK
-// ============================================
 
-function storePhase_(state) {
-  const ins = state.decoded;
+/** Prepares the next micro-program without executing a clock step. */
+function prepareCurrentMicroProgram_(state) {
+  let guard = 0;
 
-  if (!ins) {
-    throw new Error(
-      "No instruction to store."
-    );
+  while (!state.microProgram && guard < 5) {
+    guard++;
+    state.microIndex = 0;
+
+    switch (state.phase) {
+      case "FETCH": {
+        const pc = getRegister("PC");
+
+        if (
+          pc < CONFIG.MEMORY.codeStart ||
+          pc > CONFIG.MEMORY.codeEnd
+        ) {
+          throw new Error("PC outside code segment: " + pc);
+        }
+
+        state.instructionPC = pc;
+        state.decoded = null;
+        state.result = null;
+        state.lastInstructionType = "FETCH";
+        state.microContext = { instructionBytes: [] };
+        state.microProgram = getFetchMicroProgram_();
+        break;
+      }
+
+      case "DECODE": {
+        const type = instructionTypeFromOpcode_(getRegister("IR"));
+        const operandCount = ISA[type].bytes - 1;
+        const pc = getRegister("PC");
+
+        if (
+          operandCount > 0 &&
+          pc + operandCount - 1 > CONFIG.MEMORY.codeEnd
+        ) {
+          throw new Error(
+            "Instruction operands exceed code segment 00h-7Fh."
+          );
+        }
+
+        state.lastInstructionType = type;
+
+        if (operandCount === 0) {
+          state.decoded = decodeFetchedInstruction_(
+            type,
+            state.microContext.instructionBytes
+          );
+          state.phase = "EXECUTE";
+          continue;
+        }
+
+        state.microProgram = getDecodeMicroProgram_(operandCount);
+        break;
+      }
+
+      case "EXECUTE":
+        if (!state.decoded) {
+          throw new Error("No decoded instruction for execution.");
+        }
+
+        state.lastInstructionType = state.decoded.type;
+        state.microProgram = getInstructionMicroProgram_(state.decoded);
+        break;
+
+      default:
+        throw new Error("Unknown CPU phase: " + state.phase);
+    }
   }
 
-  const writingRegisters = [
-    "MOV_IMM", "MOV_REG",
-    "ADD", "SUB",
-    "INC", "DEC",
-    "AND", "OR",
-    "XOR", "NOT",
-    "LOAD"
-  ];
+  if (!state.microProgram || state.microProgram.length === 0) {
+    throw new Error("Could not prepare a valid CPU micro-program.");
+  }
+}
 
-  if (writingRegisters.includes(ins.type)) {
-    setRegister(
-      ins.register,
-      toByte(state.result)
-    );
 
-    highlightRegisters([ins.register]);
+/** Moves the state machine to the next architectural phase. */
+function completeMicroProgram_(state, completedPhase, haltRequested) {
+  state.microProgram = null;
+  state.microIndex = 0;
 
-    return (
-      ins.register + " <- " +
-      byteToHex_(
-        getRegister(ins.register)
-      ) + "h"
-    );
+  switch (completedPhase) {
+    case "FETCH":
+      state.phase = "DECODE";
+      break;
+
+    case "DECODE": {
+      const type = instructionTypeFromOpcode_(getRegister("IR"));
+
+      state.decoded = decodeFetchedInstruction_(
+        type,
+        state.microContext.instructionBytes
+      );
+
+      state.lastInstructionType = type;
+      state.phase = "EXECUTE";
+      break;
+    }
+
+    case "EXECUTE":
+      if (haltRequested) {
+        state.halted = true;
+      }
+
+      state.phase = "FETCH";
+      state.decoded = null;
+      state.microContext = { instructionBytes: [] };
+      break;
+
+    default:
+      throw new Error("Cannot complete CPU phase: " + completedPhase);
+  }
+}
+
+
+/** Human-readable bus value used by the execution trace and CPU panel. */
+function formatMicroBus_(bus) {
+  if (!bus || bus.state !== "ACTIVE") {
+    return "HIGH_Z";
   }
 
-  if (ins.type === "STORE") {
-    setRegister("MAR", ins.address);
-    setRegister(
-      "MDR",
-      toByte(state.result)
-    );
+  const value =
+    bus.value === undefined || bus.value === null
+      ? ""
+      : " = " + byteToHex_(bus.value) + "h";
 
-    Write(
-      ins.address,
-      getRegister("MDR")
-    );
-
-    highlightRegisters(["MAR", "MDR"]);
-
-    return (
-      "RAM[" +
-      byteToHex_(ins.address) +
-      "h] <- " +
-      byteToHex_(state.result) + "h"
-    );
-  }
-
-  if (ins.type === "HLT") {
-    state.halted = true;
-    return "CPU halted";
-  }
-
-  return "No write-back required";
+  return (bus.source || "BUS") + value;
 }
 
 // ============================================
@@ -611,15 +558,17 @@ function storePhase_(state) {
 function appendExecutionTrace_(
   state,
   phase,
-  detail
+  detail,
+  instructionName
 ) {
   const sheet = SpreadsheetApp.getActive()
     .getSheetByName("TRAZA");
 
-  const row = Math.max(
-    6,
-    sheet.getLastRow() + 1
-  );
+  if (!sheet) {
+    throw new Error("TRAZA sheet not found.");
+  }
+
+  const row = Math.max(6, sheet.getLastRow() + 1);
 
   sheet.getRange(row, 2, 1, 6)
     .setValues([[
@@ -627,9 +576,7 @@ function appendExecutionTrace_(
       phase,
       byteToHex_(state.instructionPC) + "h",
       byteToHex_(getRegister("IR")) + "h",
-      state.decoded
-        ? state.decoded.type
-        : "FETCH",
+      instructionName || state.lastInstructionType || "FETCH",
       detail
     ]])
     .setBackground(CONFIG.COLORS.panel)
@@ -647,54 +594,124 @@ function stepCpu() {
     return state;
   }
 
-  const phase = state.phase;
-  const flagsBefore = snapshotFlags_();
-
-  let detail = "";
-
-  switch (phase) {
-    case "FETCH":
-      detail = fetchPhase_(state);
-      state.phase = "DECODE";
-      break;
-
-    case "DECODE":
-      detail = decodePhase_(state);
-      state.phase = "EXECUTE";
-      break;
-
-    case "EXECUTE":
-      detail = executePhase_(state);
-      state.phase = "STORE";
-      break;
-
-    case "STORE":
-      detail = storePhase_(state);
-      state.phase = "FETCH";
-      break;
-
-    default:
-      throw new Error(
-        "Unknown CPU phase: " + phase
-      );
+  // Prepare the program only; this does not consume a clock step.
+  if (
+    !state.microProgram ||
+    state.microIndex >= state.microProgram.length
+  ) {
+    state.microProgram = null;
+    state.microIndex = 0;
+    prepareCurrentMicroProgram_(state);
   }
 
+  const phaseBefore = state.phase;
+  const flagsBefore = snapshotFlags_();
+  const microStep = state.microProgram[state.microIndex];
+
+  if (!microStep) {
+    throw new Error("Micro-step not found at index " + state.microIndex);
+  }
+
+  const instructionName =
+    state.decoded
+      ? state.decoded.type
+      : state.lastInstructionType;
+
+  let microResult;
+
+  if (shouldExecuteMicroStep_(microStep)) {
+    microResult = executeMicroOperation_(
+      microStep,
+      state.microContext
+    );
+  } else {
+    // A skipped conditional micro-step still consumes one clock,
+    // but no transmitter is enabled and all buses remain HIGH-Z.
+    const idleWord = createControlWord_({});
+
+    microResult = {
+      controlWord: idleWord,
+      binary: idleWord.binary,
+      activeSignals: [],
+      buses: resolveControlBuses_(idleWord, state.microContext),
+      changes: ["SKIPPED: " + microStep.condition],
+      context: state.microContext,
+      halt: false,
+      description: microStep.name
+    };
+  }
+
+  // Capture each fetched instruction operand after MDR was loaded.
+  if (microStep.captureInstructionByte) {
+    state.microContext.instructionBytes.push(getRegister("MDR"));
+  }
+
+  if (
+    microResult.context &&
+    microResult.context.aluResult !== undefined
+  ) {
+    state.result = microResult.context.aluResult;
+  }
+
+  state.lastMicroStep = microResult.description;
+  state.lastControlWord = microResult.binary;
+  state.lastActiveSignals = microResult.activeSignals;
+  state.lastBuses = microResult.buses;
+  state.lastChanges = microResult.changes;
+
+  // Exactly one micro-operation is executed per call to stepCpu().
+  state.microIndex++;
   state.steps++;
-  state.lastPhase = phase;
+
+  const completed =
+    state.microIndex >= state.microProgram.length;
+
+  const displayedPhase =
+    phaseBefore === "EXECUTE" && completed
+      ? "STORE"
+      : phaseBefore;
+
+  if (completed) {
+    completeMicroProgram_(
+      state,
+      phaseBefore,
+      microResult.halt
+    );
+  }
+
+  state.lastPhase = displayedPhase;
+
+  const changesText =
+    microResult.changes.length > 0
+      ? microResult.changes.join(" / ")
+      : "No register changes";
+
+  const detail =
+    microResult.description +
+    " | CW=" + microResult.binary +
+    " | " + changesText +
+    " | INT=" + formatMicroBus_(microResult.buses.internal) +
+    " | ADDR=" + formatMicroBus_(microResult.buses.address) +
+    " | DATA=" + formatMicroBus_(microResult.buses.data);
 
   saveExecutionState_(state);
 
   appendExecutionTrace_(
     state,
-    phase,
-    detail
+    displayedPhase,
+    detail,
+    instructionName
   );
 
   updateExecutionVisuals_(
     state,
-    phase,
+    displayedPhase,
     changedFlags_(flagsBefore)
   );
+
+  if (typeof updateControlUnitPanel_ === "function") {
+    updateControlUnitPanel_(state);
+  }
 
   return state;
 }
@@ -704,6 +721,12 @@ function stepCpu() {
 // ============================================
 
 function runCpu() {
+  // Main.gs contains the pause-aware continuous runner.
+  // Use it when available so RUN can execute the full program.
+  if (typeof edbRunContinuous_ === "function") {
+    return edbRunContinuous_();
+  }
+
   let state = getExecutionState_();
 
   if (state.halted) {
@@ -732,10 +755,10 @@ function runCpu() {
     ? 500
     : delays[speed];
 
-  // Phase 1: bounded batches.
-  const maxPhases = 20;
+  // Fallback: bounded batch of clock micro-steps.
+  const maxMicroSteps = 20;
 
-  for (let i = 0; i < maxPhases; i++) {
+  for (let i = 0; i < maxMicroSteps; i++) {
     state = getExecutionState_();
 
     if (state.halted || state.paused) {
@@ -829,7 +852,7 @@ function resetCpu() {
 // ============================================
 
 function testExecutionModule() {
-  Logger.log("=== EXECUTION TEST ===");
+  Logger.log("=== MICRO-OP EXECUTION TEST ===");
 
   const program = assembleProgram([
     "MOV AX, 5",
@@ -845,47 +868,48 @@ function testExecutionModule() {
   let state = getExecutionState_();
   let guard = 0;
 
-  while (!state.halted && guard < 40) {
+  while (!state.halted && guard < 300) {
     state = stepCpu();
     guard++;
   }
 
   if (!state.halted) {
-    throw new Error("HLT was not reached.");
+    throw new Error("HLT was not reached within 300 micro-steps.");
   }
 
   if (getRegister("AX") !== 8) {
     throw new Error("AX expected 8.");
   }
-
   Logger.log("PASS: AX = 08h");
 
   if (getRegister("BX") !== 8) {
     throw new Error("BX expected 8.");
   }
-
   Logger.log("PASS: BX = 08h");
 
   if (Read(0x80) !== 8) {
     throw new Error("RAM[80h] expected 8.");
   }
-
   Logger.log("PASS: RAM[80h] = 08h");
 
-  if (state.steps !== 20) {
+  if (state.steps !== 56) {
     throw new Error(
-      "Expected 20 execution phases."
+      "Expected 56 clock micro-steps, got " + state.steps
     );
   }
 
-  Logger.log("PASS: 20 phases executed");
+  Logger.log("PASS: 56 clock micro-steps executed");
   Logger.log("PASS: CPU halted");
+  Logger.log("=== ALL MICRO-OP EXECUTION TESTS PASSED ===");
 
-  Logger.log(
-    "=== ALL EXECUTION TESTS PASSED ==="
-  );
+  return {
+    passed: true,
+    microSteps: state.steps,
+    AX: getRegister("AX"),
+    BX: getRegister("BX"),
+    RAM80: Read(0x80)
+  };
 }
-
 
 function testFlagsDiagnostics() {
   const program = assembleProgram([
@@ -899,40 +923,158 @@ function testFlagsDiagnostics() {
 
   Logger.log("=== FLAGS DIAGNOSTICS ===");
 
-  for (let i = 1; i <= 8; i++) {
-    const state = stepCpu();
+  let state = getExecutionState_();
+  let guard = 0;
+
+  while (!state.halted && guard < 100) {
+    state = stepCpu();
 
     Logger.log(
-      "STEP " + i +
-      " | Phase=" + state.lastPhase +
+      "STEP " + state.steps +
+      " | MICRO=" + state.lastMicroStep +
       " | AX=" + byteToHex_(getRegister("AX")) +
       " | ZF=" + getFlag("ZF") +
       " | CF=" + getFlag("CF") +
       " | SF=" + getFlag("SF")
     );
+
+    guard++;
   }
 
-  const sheet = SpreadsheetApp.getActive()
-    .getSheetByName("CPU");
-
-  Logger.log(
-    "SHEET FLAGS: ZF=" +
-    sheet.getRange("N7").getValue() +
-    " CF=" +
-    sheet.getRange("N8").getValue() +
-    " SF=" +
-    sheet.getRange("N9").getValue()
-  );
-
   const passed =
+    state.halted &&
     getRegister("AX") === 0 &&
     getFlag("ZF") === 1 &&
     getFlag("CF") === 1 &&
     getFlag("SF") === 0;
 
-  Logger.log(
-    passed
-      ? "PASS: Flags and ALU are correct"
-      : "FAIL: Check ALU or CPU flag updates"
-  );
+  if (!passed) {
+    throw new Error("Flags or ALU micro-operation integration failed.");
+  }
+
+  Logger.log("PASS: AX=00h");
+  Logger.log("PASS: ZF=1, CF=1, SF=0");
+  Logger.log("=== FLAGS TEST PASSED ===");
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    AX: getRegister("AX"),
+    ZF: getFlag("ZF"),
+    CF: getFlag("CF"),
+    SF: getFlag("SF")
+  };
+}
+
+
+// ============================================
+// PHASE 2 - FOUR REGISTER INTEGRATION TEST
+// ============================================
+
+/**
+ * Tests the full FETCH/DECODE/EXECUTE/STORE pipeline
+ * using AX, BX, CX, DX, ALU, flags and memory.
+ *
+ * NOTE: Replaces the current program in code RAM,
+ * resets CPU registers and clears the execution trace.
+ */
+function testPhase2ExecutionModule() {
+  Logger.log("=== FOUR REGISTER MICRO-OP TEST ===");
+
+  const lines = [
+    "MOV AX, FFh",
+    "MOV BX, 01h",
+    "MOV CX, 02h",
+    "MOV DX, 03h",
+    "ADD AX, BX",
+    "MOV CX, AX",
+    "SUB DX, BX",
+    "OR CX, DX",
+    "STORE [80h], CX",
+    "LOAD BX, [80h]",
+    "CMP BX, DX",
+    "HLT"
+  ];
+
+  const program = assembleProgram(lines);
+  loadProgram(program);
+  resetCpu();
+
+  let state = getExecutionState_();
+  let guard = 0;
+
+  while (!state.halted && guard < 500) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (!state.halted || state.steps !== 150) {
+    throw new Error(
+      "Expected 150 micro-steps and HLT; got " + state.steps
+    );
+  }
+  Logger.log("PASS: 150 clock micro-steps and HLT");
+
+  const expected = { AX: 0, BX: 2, CX: 2, DX: 2 };
+
+  Object.keys(expected).forEach(name => {
+    const actual = getRegister(name);
+
+    if (actual !== expected[name]) {
+      throw new Error(
+        name + " expected " + expected[name] + ", got " + actual
+      );
+    }
+  });
+
+  Logger.log("PASS: AX, BX, CX, DX execute independently");
+
+  if (Read(0x80) !== 2) {
+    throw new Error("RAM[80h] must contain 02h.");
+  }
+  Logger.log("PASS: STORE and LOAD through RAM[80h]");
+
+  if (
+    getFlag("ZF") !== 1 ||
+    getFlag("CF") !== 0 ||
+    getFlag("SF") !== 0
+  ) {
+    throw new Error("CMP flags are incorrect.");
+  }
+  Logger.log("PASS: ZF=1, CF=0, SF=0");
+
+  if (
+    getRegister("IR") !== ISA.HLT.opcode ||
+    getRegister("PC") !== program.length
+  ) {
+    throw new Error("PC or IR execution state is incorrect.");
+  }
+  Logger.log("PASS: PC and IR after HLT");
+
+  if (
+    !isValidByte(getRegister("MAR")) ||
+    !isValidByte(getRegister("MDR"))
+  ) {
+    throw new Error("MAR or MDR is out of 8-bit range.");
+  }
+  Logger.log("PASS: MAR and MDR remain 8-bit");
+
+  Logger.log("=== ALL FOUR REGISTER MICRO-OP TESTS PASSED ===");
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    registers: {
+      AX: getRegister("AX"),
+      BX: getRegister("BX"),
+      CX: getRegister("CX"),
+      DX: getRegister("DX")
+    },
+    RAM80: Read(0x80),
+    flags: {
+      ZF: getFlag("ZF"),
+      CF: getFlag("CF"),
+      SF: getFlag("SF")
+    }
+  };
 }

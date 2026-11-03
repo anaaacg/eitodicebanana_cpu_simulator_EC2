@@ -158,10 +158,10 @@ function setupHome_() {
     ["CPU STATUS", "READY"],
     ["ARCHITECTURE", "8-BIT"],
     ["MEMORY", "256 BYTES"],
-    ["ACTIVE REGISTERS", "AX / BX"],
-    ["RESERVED REGISTERS", "CX / DX"],
+    ["GENERAL REGISTERS", "AX / BX / CX / DX"],
+    ["REGISTER WIDTH", "4 x 8-BIT"],
     ["EXECUTION PHASE", "FETCH"],
-    ["CURRENT MODE", "PHASE 1"]
+    ["CURRENT MODE", "PHASE 2"]
   ];
 
   data.forEach((item, i) => {
@@ -232,12 +232,6 @@ function setupCPU_() {
 
     s.getRange(row, 3).setValue(item[0]);
     valueCell_(s, "E" + row, item[1]);
-
-    if (item[0] === "CX" || item[0] === "DX") {
-      s.getRange(row, 7)
-        .setValue("RESERVED")
-        .setFontColor(CONFIG.COLORS.muted);
-    }
   });
 
   section_(s, "J5:R5", "STATUS FLAGS");
@@ -257,7 +251,7 @@ function setupCPU_() {
   s.getRange("K16").setValue("CPU STATUS");
   valueCell_(s, "N16", "READY");
 
-  section_(s, "B19:R19", "INSTRUCTION CYCLE");
+  section_(s, "B19:R19", "MICRO-OPERATION EXECUTION");
 
   const phases = [
     "FETCH",
@@ -696,3 +690,296 @@ function removeCPUControlTrigger() {
     3
   );
 }
+
+function upgradeCPUInterfacePhase2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const cpu = ss.getSheetByName("CPU");
+  const home = ss.getSheetByName("INICIO");
+  const C = CONFIG.COLORS;
+
+  // Activate CX and DX visually.
+  ["G13", "G14"].forEach(cell => {
+    cpu.getRange(cell)
+      .clearContent()
+      .setBackground(C.background);
+  });
+
+  // Update register information on HOME.
+  home.getRange("G10")
+    .setValue("AX / BX / CX / DX");
+
+  home.getRange("C11")
+    .setValue("GENERAL REGISTERS");
+
+  home.getRange("G11")
+    .setValue("4 x 8-BIT");
+
+  home.getRange("G13")
+    .setValue("PHASE 2");
+
+  // Refresh registers and flags.
+  syncCPUDisplay();
+
+  ss.toast(
+    "Four-register CPU interface activated",
+    "EitoDiceBanana",
+    4
+  );
+}
+
+function setupControlUnitPanel() {
+  const s = SpreadsheetApp.getActive()
+    .getSheetByName("CPU");
+
+  if (!s) {
+    throw new Error("CPU sheet not found.");
+  }
+
+  const C = CONFIG.COLORS;
+
+  function mergeCell(range, value, color) {
+    const r = s.getRange(range);
+
+    r.breakApart();
+    r.merge();
+
+    r.setValue(value);
+    r.setBackground(C.panel);
+    r.setFontColor(color || C.white);
+    r.setFontWeight("bold");
+    r.setHorizontalAlignment("center");
+    r.setVerticalAlignment("middle");
+    r.setWrap(true);
+  }
+
+  // CONTROL WORD PANEL
+  section_(
+    s,
+    "B35:R35",
+    "CONTROL WORD / MICRO-OPERATIONS"
+  );
+
+  mergeCell("C36:D36", "MICRO-STEP", C.muted);
+  mergeCell("E36:R36", "-", C.yellow);
+
+  mergeCell("C37:D37", "CONTROL WORD", C.muted);
+  mergeCell("E37:R37", "-", C.yellow);
+
+  mergeCell("C38:D38", "ACTIVE SIGNALS", C.muted);
+  mergeCell("E38:R38", "-", C.yellow);
+
+  // BUS STATUS
+  mergeCell("C39:D39", "INTERNAL BUS", C.muted);
+  mergeCell("E39:G39", "HIGH_Z", C.yellow);
+
+  mergeCell("H39:I39", "ADDRESS", C.muted);
+  mergeCell("J39:L39", "HIGH_Z", C.yellow);
+
+  mergeCell("M39:N39", "DATA", C.muted);
+  mergeCell("O39:R39", "HIGH_Z", C.yellow);
+
+  mergeCell("C40:D40", "CHANGES", C.muted);
+  mergeCell("E40:R40", "-", C.yellow);
+
+  // TRI-STATE BUFFER PANEL
+  section_(
+    s,
+    "B42:R42",
+    "TRI-STATE BUFFER STATUS"
+  );
+
+  mergeCell("C43:D43", "INTERNAL", C.muted);
+  mergeCell("E43:R43", "NOT AVAILABLE", C.yellow);
+
+  mergeCell("C44:D44", "ADDRESS", C.muted);
+  mergeCell("E44:R44", "NOT AVAILABLE", C.yellow);
+
+  mergeCell("C45:D45", "DATA", C.muted);
+  mergeCell("E45:R45", "NOT AVAILABLE", C.yellow);
+
+  s.setRowHeight(35, 30);
+  s.setRowHeight(36, 30);
+  s.setRowHeight(37, 30);
+  s.setRowHeight(38, 45);
+  s.setRowHeight(39, 32);
+  s.setRowHeight(40, 45);
+  s.setRowHeight(42, 30);
+  s.setRowHeight(43, 55);
+  s.setRowHeight(44, 35);
+  s.setRowHeight(45, 35);
+
+  updateControlUnitPanel_(getExecutionState_());
+
+  SpreadsheetApp.flush();
+
+  SpreadsheetApp.getActive().toast(
+    "Control Unit panel installed",
+    "EitoDiceBanana",
+    4
+  );
+}
+
+
+// ============================================
+// UPDATE CONTROL UNIT VISUALS
+// ============================================
+
+function updateControlUnitPanel_(state) {
+  const s = SpreadsheetApp.getActive()
+    .getSheetByName("CPU");
+
+  if (!s) return;
+
+  const C = CONFIG.COLORS;
+
+  const buses = state.lastBuses || {};
+  const buffers = buses.buffers || {};
+
+  s.getRange("E36")
+    .setValue(state.lastMicroStep || "-");
+
+  s.getRange("E37")
+    .setValue(state.lastControlWord || "-")
+    .setFontColor(C.yellow);
+
+  s.getRange("E38")
+    .setValue(
+      (state.lastActiveSignals || []).join(" | ") || "NONE"
+    );
+
+  s.getRange("E39")
+    .setValue(formatMicroBus_(buses.internal));
+
+  s.getRange("J39")
+    .setValue(formatMicroBus_(buses.address));
+
+  s.getRange("O39")
+    .setValue(formatMicroBus_(buses.data));
+
+  s.getRange("E40")
+    .setValue(
+      (state.lastChanges || []).join(" | ") || "NONE"
+    );
+
+  function bufferSummary(group) {
+    if (!group || Object.keys(group).length === 0) {
+      return "NOT AVAILABLE";
+    }
+
+    return Object.keys(group)
+      .map(function(name) {
+        return name + ": " + group[name];
+      })
+      .join(" | ");
+  }
+
+  s.getRange("E43")
+    .setValue(bufferSummary(buffers.internal));
+
+  s.getRange("E44")
+    .setValue(bufferSummary(buffers.address));
+
+  s.getRange("E45")
+    .setValue(bufferSummary(buffers.data));
+
+  s.getRange("E38:R40")
+    .setFontSize(8)
+    .setWrap(true);
+
+  s.getRange("E43:R45")
+    .setFontSize(7)
+    .setWrap(true);
+}
+
+/**
+ * EitoDiceBanana
+ * Remove obsolete checkbox controls.
+ *
+ * Preserves:
+ * - Drawing buttons
+ * - STEP / RUN / PAUSE / RESET
+ * - LOAD PROGRAM
+ * - Speed selector
+ * - CPU registers and flags
+ */
+
+function cleanupCPUControls() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("CPU");
+
+  if (!sheet) {
+    throw new Error("CPU sheet not found.");
+  }
+
+  const C = CONFIG.COLORS;
+
+  // Remove obsolete checkboxes behind drawing buttons.
+  const checkboxCells = [
+    "C28",
+    "G28",
+    "K28",
+    "O28"
+  ];
+
+  checkboxCells.forEach(function(address) {
+    const cell = sheet.getRange(address);
+
+    cell.clearDataValidations();
+    cell.clearContent();
+    cell.clearNote();
+    cell.setBackground(C.background);
+  });
+
+  // Remove duplicate titles behind graphical buttons.
+  const oldControls = [
+    "B27:E27",
+    "F27:I27",
+    "J27:M27",
+    "N27:Q27"
+  ];
+
+  oldControls.forEach(function(address) {
+    const range = sheet.getRange(address);
+
+    range.clearContent();
+    range.setBackground(C.background);
+  });
+
+  // Remove obsolete instruction text.
+  sheet.getRange("B32:R32")
+    .clearContent()
+    .setBackground(C.background);
+
+  // Preserve the speed selector in G29.
+
+  // Remove the old checkbox edit trigger, if installed.
+  ScriptApp.getProjectTriggers()
+    .filter(function(trigger) {
+      return trigger.getHandlerFunction() ===
+        "edbControlOnEdit";
+    })
+    .forEach(function(trigger) {
+      ScriptApp.deleteTrigger(trigger);
+    });
+
+  SpreadsheetApp.flush();
+
+  ss.toast(
+    "Duplicate controls removed successfully",
+    "EitoDiceBanana",
+    4
+  );
+
+  Logger.log(
+    "PASS: Obsolete checkbox controls removed"
+  );
+
+  Logger.log(
+    "PASS: Drawing buttons preserved"
+  );
+
+  Logger.log(
+    "PASS: Speed selector preserved"
+  );
+}
+
