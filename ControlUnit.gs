@@ -416,10 +416,42 @@ function resolveControlBuses_(word, context) {
     };
   }
 
+    // Individual tri-state buffer status.
+  const buffers = {
+    internal: {
+      PC: s.En_PC ? "ACTIVE" : "HIGH_Z",
+      IR: s.En_IR ? "ACTIVE" : "HIGH_Z",
+
+      AX: s.En_AX ? "ACTIVE" : "HIGH_Z",
+      BX: s.En_BX ? "ACTIVE" : "HIGH_Z",
+      CX: s.En_CX ? "ACTIVE" : "HIGH_Z",
+      DX: s.En_DX ? "ACTIVE" : "HIGH_Z",
+
+      MDR: (s.En_MDR && !s.Mem_W)
+        ? "ACTIVE" : "HIGH_Z",
+
+      ALU: s.En_ALU ? "ACTIVE" : "HIGH_Z",
+      KBD: s.En_KBD ? "ACTIVE" : "HIGH_Z",
+      IMM: s.En_IMM ? "ACTIVE" : "HIGH_Z"
+    },
+
+    address: {
+      MAR: s.En_MAR ? "ACTIVE" : "HIGH_Z"
+    },
+
+    data: {
+      MEMORY: s.Mem_R ? "ACTIVE" : "HIGH_Z",
+
+      MDR: (s.Mem_W && s.En_MDR)
+        ? "ACTIVE" : "HIGH_Z"
+    }
+  };
+
   return {
     internal: internalBus,
     address: addressBus,
-    data: dataBus
+    data: dataBus,
+    buffers: buffers
   };
 }
 
@@ -1238,6 +1270,14 @@ function runControlUnitTests() {
     {
       name: "BUS CONTENTION AND HIGH-Z",
       fn: testControlBusContention
+    },
+    {
+      name: "INSTRUCTION MICROPROGRAMS",
+      fn: testInstructionMicroProgramCoverage
+    },
+    {
+      name: "KEYBOARD AND LCD SIGNALS",
+      fn: testControlUnitPeripheralSignals
     }
   ];
 
@@ -1287,5 +1327,197 @@ function runControlUnitTests() {
   return {
     passed: true,
     totalTests: tests.length
+  };
+}
+
+function testInstructionMicroProgramCoverage() {
+  const instructions = [
+    {
+      type: "MOV_IMM",
+      register: "AX",
+      mode: "IMMEDIATE",
+      operand: 10
+    },
+    {
+      type: "MOV_REG",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "LOAD",
+      register: "AX",
+      address: 128
+    },
+    {
+      type: "STORE",
+      register: "AX",
+      address: 128
+    },
+    {
+      type: "ADD",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "SUB",
+      register: "AX",
+      mode: "IMMEDIATE",
+      operand: 1
+    },
+    {
+      type: "INC",
+      register: "AX"
+    },
+    {
+      type: "DEC",
+      register: "AX"
+    },
+    {
+      type: "CMP",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "AND",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "OR",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "XOR",
+      register: "AX",
+      mode: "REGISTER",
+      operand: 1
+    },
+    {
+      type: "NOT",
+      register: "AX"
+    },
+    {
+      type: "JMP",
+      address: 16
+    },
+    {
+      type: "JZ",
+      address: 16
+    },
+    {
+      type: "JNZ",
+      address: 16
+    },
+    {
+      type: "HLT"
+    }
+  ];
+
+  const results = [];
+
+  instructions.forEach(function(instruction) {
+    const steps = getInstructionMicroProgram_(
+      instruction
+    );
+
+    assertControlUnit_(
+      steps.length > 0,
+      instruction.type + " has no micro-operations"
+    );
+
+    steps.forEach(function(step) {
+      validateControlWord_(step.controlWord);
+    });
+
+    results.push({
+      instruction: instruction.type,
+      microSteps: steps.length
+    });
+  });
+
+  Logger.log(
+    "PASS: All " + instructions.length +
+    " instruction micro-programs are valid."
+  );
+
+  Logger.log(JSON.stringify(results, null, 2));
+
+  return {
+    passed: true,
+    instructions: results
+  };
+}
+
+
+function testControlUnitPeripheralSignals() {
+
+  // KEYBOARD TEST
+  const keyboardContext = {
+    keyboardQueue: [65, 66]
+  };
+
+  const keyboardStep = makeMicroStep_(
+    "TEST_KEYBOARD_READ",
+    {
+      En_KBD: 1
+    }
+  );
+
+  const keyboardResult = executeMicroOperation_(
+    keyboardStep,
+    keyboardContext
+  );
+
+  assertControlUnit_(
+    keyboardResult.buses.internal.value === 65,
+    "Keyboard must transmit its first value"
+  );
+
+  assertControlUnit_(
+    keyboardContext.keyboardQueue.length === 1,
+    "Keyboard must remove the consumed value"
+  );
+
+
+  // LCD TEST
+  const lcdContext = {};
+
+  const lcdStep = makeMicroStep_(
+    "TEST_LCD_WRITE",
+    {
+      En_IMM: 1,
+      Ld_LCD: 1
+    },
+    {
+      inputs: {
+        immediate: 65
+      }
+    }
+  );
+
+  executeMicroOperation_(
+    lcdStep,
+    lcdContext
+  );
+
+  assertControlUnit_(
+    lcdContext.lcdBuffer === "A",
+    "LCD must receive character A"
+  );
+
+  Logger.log(
+    "PASS: En_KBD and Ld_LCD"
+  );
+
+  return {
+    passed: true,
+    keyboardConsumed: 65,
+    lcdBuffer: lcdContext.lcdBuffer
   };
 }
