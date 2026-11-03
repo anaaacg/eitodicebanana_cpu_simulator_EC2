@@ -696,3 +696,39 @@ function removeCPUControlTrigger() {
     3
   );
 }
+
+function upgradeCPUInterfacePhase2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const cpu = ss.getSheetByName("CPU");
+  const home = ss.getSheetByName("INICIO");
+  const C = CONFIG.COLORS;
+
+  // Activate CX and DX visually.
+  ["G13", "G14"].forEach(cell => {
+    cpu.getRange(cell)
+      .clearContent()
+      .setBackground(C.background);
+  });
+
+  // Update register information on HOME.
+  home.getRange("G10")
+    .setValue("AX / BX / CX / DX");
+
+  home.getRange("C11")
+    .setValue("GENERAL REGISTERS");
+
+  home.getRange("G11")
+    .setValue("4 x 8-BIT");
+
+  home.getRange("G13")
+    .setValue("PHASE 2");
+
+  // Refresh registers and flags.
+  syncCPUDisplay();
+
+  ss.toast(
+    "Four-register CPU interface activated",
+    "EitoDiceBanana",
+    4
+  );
+}
