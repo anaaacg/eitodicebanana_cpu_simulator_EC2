@@ -158,10 +158,10 @@ function setupHome_() {
     ["CPU STATUS", "READY"],
     ["ARCHITECTURE", "8-BIT"],
     ["MEMORY", "256 BYTES"],
-    ["ACTIVE REGISTERS", "AX / BX"],
-    ["RESERVED REGISTERS", "CX / DX"],
+    ["GENERAL REGISTERS", "AX / BX / CX / DX"],
+    ["REGISTER WIDTH", "4 x 8-BIT"],
     ["EXECUTION PHASE", "FETCH"],
-    ["CURRENT MODE", "PHASE 1"]
+    ["CURRENT MODE", "PHASE 2"]
   ];
 
   data.forEach((item, i) => {
@@ -196,7 +196,7 @@ function setupHome_() {
 
   section_(s, "B30:R30", "EITODICEBANANA PROJECT");
   s.getRange("B32:R32").merge()
-    .setValue("PHASE 1 - FUNCTIONAL CPU FOUNDATION");
+    .setValue("PHASE 2 - CONTROL UNIT / MICRO-OPERATIONS");
 }
 
 
@@ -232,12 +232,6 @@ function setupCPU_() {
 
     s.getRange(row, 3).setValue(item[0]);
     valueCell_(s, "E" + row, item[1]);
-
-    if (item[0] === "CX" || item[0] === "DX") {
-      s.getRange(row, 7)
-        .setValue("RESERVED")
-        .setFontColor(CONFIG.COLORS.muted);
-    }
   });
 
   section_(s, "J5:R5", "STATUS FLAGS");
@@ -257,7 +251,7 @@ function setupCPU_() {
   s.getRange("K16").setValue("CPU STATUS");
   valueCell_(s, "N16", "READY");
 
-  section_(s, "B19:R19", "INSTRUCTION CYCLE");
+  section_(s, "B19:R19", "MICRO-OPERATION EXECUTION");
 
   const phases = [
     "FETCH",
@@ -419,16 +413,16 @@ function setupTrace_() {
   title_(
     s,
     "EXECUTION TRACE",
-    "FETCH | DECODE | EXECUTE | STORE"
+    "CLOCK MICRO-OPERATIONS | CONTROL WORD | BUS ACTIVITY"
   );
-
+  
   const headers = [
-    "STEP",
-    "PHASE",
+    "CLOCK",
+    "STAGE",
     "PC",
-    "OPCODE",
-    "OPERATION",
-    "DETAIL"
+    "IR",
+    "INSTRUCTION",
+    "MICRO-OPERATION / CONTROL WORD"
   ];
 
   s.getRange(5, 2, 1, headers.length)
@@ -618,6 +612,7 @@ function installCPUControlTrigger() {
 /**
  * Executes commands when checkboxes are selected.
  */
+
 function edbControlOnEdit(e) {
   if (!e || !e.range) return;
 
@@ -637,33 +632,54 @@ function edbControlOnEdit(e) {
   const action = actions[range.getA1Notation()];
   if (!action) return;
 
-  // Release the control immediately.
+  // Release checkbox.
   range.setValue(false);
+
+  // PAUSE must be requested without waiting
+  // for the execution lock held by RUN.
+  if (action === "PAUSE") {
+    uiPause();
+    return;
+  }
 
   const lock = LockService.getDocumentLock();
 
-  if (!lock.tryLock(1000)) {
+  if (!lock || !lock.tryLock(1000)) {
     e.source.toast("CPU busy", "EitoDiceBanana", 3);
     return;
   }
 
   try {
     switch (action) {
-      case "STEP":
-        const state = getExecutionState_();
-        if (state.paused) resumeCpu();
-        if (!state.halted) stepCpu();
+
+      case "STEP": {
+        // Clear a previous pause request.
+        if (typeof edbRequestPause_ === "function") {
+          edbRequestPause_(false);
+        }
+
+        let state = getExecutionState_();
+
+        if (state.paused) {
+          state = resumeCpu();
+        }
+
+        if (!state.halted) {
+          stepCpu();
+        }
+
         break;
+      }
 
       case "RUN":
         runCpu();
         break;
 
-      case "PAUSE":
-        pauseCpu();
-        break;
-
       case "RESET":
+        if (typeof edbRequestPause_ === "function") {
+          edbRequestPause_(false);
+        }
+
         resetCpu();
         break;
     }
@@ -679,6 +695,7 @@ function edbControlOnEdit(e) {
     lock.releaseLock();
   }
 }
+
 
 
 function removeCPUControlTrigger() {
@@ -697,38 +714,117 @@ function removeCPUControlTrigger() {
   );
 }
 
+
 function upgradeCPUInterfacePhase2() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const cpu = ss.getSheetByName("CPU");
-  const home = ss.getSheetByName("INICIO");
+
+  if (!cpu) {
+    throw new Error("CPU sheet not found.");
+  }
+
   const C = CONFIG.COLORS;
 
-  // Activate CX and DX visually.
-  ["G13", "G14"].forEach(cell => {
+  // Remove obsolete RESERVED labels for CX and DX.
+  ["G13", "G14"].forEach(function(cell) {
     cpu.getRange(cell)
       .clearContent()
       .setBackground(C.background);
   });
 
-  // Update register information on HOME.
-  home.getRange("G10")
-    .setValue("AX / BX / CX / DX");
-
-  home.getRange("C11")
-    .setValue("GENERAL REGISTERS");
-
-  home.getRange("G11")
-    .setValue("4 x 8-BIT");
-
-  home.getRange("G13")
-    .setValue("PHASE 2");
-
-  // Refresh registers and flags.
+  // Refresh the register display.
   syncCPUDisplay();
 
-  ss.toast(
-    "Four-register CPU interface activated",
-    "EitoDiceBanana",
-    4
+  // Install and initialize the Control Unit panel.
+  setupControlUnitPanel();
+
+  // Restore the actual execution status.
+  const state = getExecutionState_();
+
+  updateExecutionVisuals_(
+    state,
+    state.lastPhase === "-" ? state.phase : state.lastPhase,
+    []
   );
+
+  SpreadsheetApp.flush();
+
+  ss.toast(
+    "Phase 2 Control Unit interface activated",
+    "EitoDiceBanana",
+    5
+  );
+}
+
+
+
+// ============================================
+// UPDATE CONTROL UNIT VISUALS
+// ============================================
+
+function updateControlUnitPanel_(state) {
+  const s = SpreadsheetApp.getActive()
+    .getSheetByName("CPU");
+
+  if (!s) return;
+
+  const C = CONFIG.COLORS;
+
+  const buses = state.lastBuses || {};
+  const buffers = buses.buffers || {};
+
+  s.getRange("E36")
+    .setValue(state.lastMicroStep || "-");
+
+  s.getRange("E37")
+    .setValue(state.lastControlWord || "-")
+    .setFontColor(C.yellow);
+
+  s.getRange("E38")
+    .setValue(
+      (state.lastActiveSignals || []).join(" | ") || "NONE"
+    );
+
+  s.getRange("E39")
+    .setValue(formatMicroBus_(buses.internal));
+
+  s.getRange("J39")
+    .setValue(formatMicroBus_(buses.address));
+
+  s.getRange("O39")
+    .setValue(formatMicroBus_(buses.data));
+
+  s.getRange("E40")
+    .setValue(
+      (state.lastChanges || []).join(" | ") || "NONE"
+    );
+
+  function bufferSummary(group) {
+    if (!group || Object.keys(group).length === 0) {
+      return "NOT AVAILABLE";
+    }
+
+    return Object.keys(group)
+      .map(function(name) {
+        return name + ": " + group[name];
+      })
+      .join(" | ");
+  }
+
+  s.getRange("E43")
+    .setValue(bufferSummary(buffers.internal));
+
+  s.getRange("E44")
+    .setValue(bufferSummary(buffers.address));
+
+  s.getRange("E45")
+    .setValue(bufferSummary(buffers.data));
+
+  s.getRange("E38:R40")
+    .setFontSize(8)
+    .setWrap(true);
+
+  s.getRange("E43:R45")
+    .setFontSize(7)
+    .setWrap(true);
 }
