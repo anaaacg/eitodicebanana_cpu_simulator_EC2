@@ -3,8 +3,7 @@
  * EitoDiceBanana CPU Simulator
  * Computer Architecture - UCB
  *
- * Phase 1: Functional 8-bit CPU
- * Phase 2: Advanced architecture (reserved)
+ * Phase 2 Configuration
  */
 
 const CONFIG = {
@@ -12,8 +11,8 @@ const CONFIG = {
   PROJECT: {
     name: "EitoDiceBanana",
     subtitle: "8-BIT CPU SIMULATOR",
-    version: "1.0.0",
-    phase: 1
+    version: "2.0.0",
+    phase: 2
   },
 
   COLORS: {
@@ -32,14 +31,27 @@ const CONFIG = {
     bits: 8,
     maxValue: 255,
 
-    activeRegisters: ["AX", "BX"],
-    reservedRegisters: ["CX", "DX"],
-
-    controlRegisters: [
-      "PC", "IR", "MAR", "MDR"
+    activeRegisters: [
+      "AX",
+      "BX",
+      "CX",
+      "DX"
     ],
 
-    flags: ["ZF", "CF", "SF"],
+    reservedRegisters: [],
+
+    controlRegisters: [
+      "PC",
+      "IR",
+      "MAR",
+      "MDR"
+    ],
+
+    flags: [
+      "ZF",
+      "CF",
+      "SF"
+    ],
 
     phases: [
       "FETCH",
