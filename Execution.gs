@@ -1,13 +1,9 @@
-
 /**
  * EitoDiceBanana CPU Simulator
- * Execution Engine - Phase 2
+ * Execution Engine — Phase 2 / Task 08
  *
  * FETCH -> DECODE -> EXECUTE -> STORE
- *
- * Functional: CPU, RAM, ALU, ASM and visual feedback
- * Registers: AX, BX, CX, DX (8-bit)
- * Reserved: Buses, Cache, MMU, I/O
+ * Memory operations use the MMU and virtual memory.
  */
 
 const EXECUTION_KEY = "EDB_EXECUTION_STATE";
@@ -19,9 +15,9 @@ const EXECUTION_PHASE_CELLS = {
   STORE: "O21"
 };
 
-// ============================================
+// ------------------------------------------------------------
 // EXECUTION STATE
-// ============================================
+// ------------------------------------------------------------
 
 function defaultExecutionState_() {
   return {
@@ -33,16 +29,11 @@ function defaultExecutionState_() {
     steps: 0,
     instructionPC: 0,
     lastPhase: "-",
-
-    // Current micro-program and clock position.
     microProgram: null,
     microIndex: 0,
-
-    // Context is preserved between STEP presses.
     microContext: {
       instructionBytes: []
     },
-
     lastInstructionType: "FETCH",
     lastMicroStep: "-",
     lastControlWord: "",
@@ -66,12 +57,8 @@ function getExecutionState_() {
   }
 
   const saved = JSON.parse(raw);
-  const state = Object.assign(
-    defaultExecutionState_(),
-    saved
-  );
+  const state = Object.assign(defaultExecutionState_(), saved);
 
-  // Migrate old states created before micro-step execution.
   if (!Object.prototype.hasOwnProperty.call(saved, "microIndex")) {
     state.phase = "FETCH";
     state.decoded = null;
@@ -131,47 +118,35 @@ function resetExecutionState() {
   return state;
 }
 
-// ============================================
+// ------------------------------------------------------------
 // VISUAL FEEDBACK
-// ============================================
+// ------------------------------------------------------------
 
-function updateExecutionVisuals_(
-  state,
-  executedPhase,
-  changedFlags
-) {
+function updateExecutionVisuals_(state, executedPhase, changedFlags) {
   const sheet = cpuSheet_();
   const C = CONFIG.COLORS;
 
-  // Reset the four phase indicators.
-  Object.keys(EXECUTION_PHASE_CELLS)
-    .forEach(phase => {
-      sheet.getRange(EXECUTION_PHASE_CELLS[phase])
-        .setBackground(C.panelAlt)
-        .setFontColor(C.muted)
-        .setFontWeight("bold");
-    });
+  Object.keys(EXECUTION_PHASE_CELLS).forEach(function(phase) {
+    sheet.getRange(EXECUTION_PHASE_CELLS[phase])
+      .setBackground(C.panelAlt)
+      .setFontColor(C.muted)
+      .setFontWeight("bold");
+  });
 
-  // Highlight the phase just executed.
-  const visiblePhase =
-    executedPhase || state.phase;
+  const visiblePhase = executedPhase || state.phase;
 
   if (EXECUTION_PHASE_CELLS[visiblePhase]) {
-    sheet.getRange(
-      EXECUTION_PHASE_CELLS[visiblePhase]
-    )
+    sheet.getRange(EXECUTION_PHASE_CELLS[visiblePhase])
       .setBackground(C.yellow)
       .setFontColor(C.background)
       .setFontWeight("bold");
   }
 
-  // Current phase panel.
   sheet.getRange(CPU_LAYOUT.phase)
     .setValue(visiblePhase)
     .setBackground(C.yellow)
     .setFontColor(C.background);
 
-  // CPU status.
   const status = state.halted
     ? "HALT"
     : state.paused
@@ -189,16 +164,10 @@ function updateExecutionVisuals_(
     .setBackground(C.panelAlt)
     .setFontColor(statusColor);
 
-  // Highlight modified flags.
-  CONFIG.CPU.flags.forEach(flag => {
-    const cell = sheet.getRange(
-      CPU_LAYOUT.flags[flag]
-    );
+  CONFIG.CPU.flags.forEach(function(flag) {
+    const cell = sheet.getRange(CPU_LAYOUT.flags[flag]);
 
-    if (
-      changedFlags &&
-      changedFlags.includes(flag)
-    ) {
+    if (changedFlags && changedFlags.includes(flag)) {
       cell.setBackground(C.yellow)
         .setFontColor(C.background);
     } else {
@@ -207,7 +176,6 @@ function updateExecutionVisuals_(
     }
   });
 
-  // Synchronize HOME dashboard.
   const home = SpreadsheetApp.getActive()
     .getSheetByName("INICIO");
 
@@ -226,14 +194,14 @@ function snapshotFlags_() {
 }
 
 function changedFlags_(before) {
-  return CONFIG.CPU.flags.filter(
-    flag => before[flag] !== getFlag(flag)
-  );
+  return CONFIG.CPU.flags.filter(function(flag) {
+    return before[flag] !== getFlag(flag);
+  });
 }
 
-// ============================================
+// ------------------------------------------------------------
 // DECODING UTILITIES
-// ============================================
+// ------------------------------------------------------------
 
 function decodeRegister_(code) {
   const registers = {
@@ -243,18 +211,13 @@ function decodeRegister_(code) {
     3: "DX"
   };
 
-  if (!Object.prototype.hasOwnProperty.call(
-    registers, code
-  )) {
-    throw new Error(
-      "Invalid register code: " + code
-    );
+  if (!Object.prototype.hasOwnProperty.call(registers, code)) {
+    throw new Error("Invalid register code: " + code);
   }
 
   return registers[code];
 }
 
-/** Returns the mnemonic associated with a machine opcode. */
 function instructionTypeFromOpcode_(opcode) {
   const type = Object.keys(ISA).find(function(name) {
     return ISA[name].opcode === opcode;
@@ -269,12 +232,24 @@ function instructionTypeFromOpcode_(opcode) {
   return type;
 }
 
-
-/** Builds the decoded instruction from bytes fetched through MDR. */
+/**
+ * Decodes operands captured from virtual memory through MDR.
+ *
+ * LOAD:
+ *   opcode, register, addressHigh, addressLow
+ *
+ * STORE:
+ *   opcode, addressHigh, addressLow, register
+ *
+ * Virtual address = (addressHigh * 256) + addressLow.
+ */
 function decodeFetchedInstruction_(type, bytes) {
   const expectedBytes = ISA[type].bytes - 1;
 
-  if (!Array.isArray(bytes) || bytes.length !== expectedBytes) {
+  if (
+    !Array.isArray(bytes) ||
+    bytes.length !== expectedBytes
+  ) {
     throw new Error(
       "Invalid operand byte count for " + type +
       ": expected " + expectedBytes + ", got " +
@@ -322,15 +297,38 @@ function decodeFetchedInstruction_(type, bytes) {
       decodeRegister_(ins.operand);
       break;
 
-    case "LOAD":
+    case "LOAD": {
       ins.register = decodeRegister_(read(0));
-      ins.address = read(1);
-      break;
 
-    case "STORE":
-      ins.address = read(0);
-      ins.register = decodeRegister_(read(1));
+      const addressHigh = read(1);
+      const addressLow = read(2);
+
+      ins.address = (addressHigh << 8) | addressLow;
+
+      if (!isValidVirtualAddress(ins.address)) {
+        throw new Error(
+          "Invalid LOAD virtual address: " + ins.address
+        );
+      }
+
       break;
+    }
+
+    case "STORE": {
+      const addressHigh = read(0);
+      const addressLow = read(1);
+
+      ins.address = (addressHigh << 8) | addressLow;
+      ins.register = decodeRegister_(read(2));
+
+      if (!isValidVirtualAddress(ins.address)) {
+        throw new Error(
+          "Invalid STORE virtual address: " + ins.address
+        );
+      }
+
+      break;
+    }
 
     case "INC":
     case "DEC":
@@ -345,6 +343,7 @@ function decodeFetchedInstruction_(type, bytes) {
     case "OR":
     case "XOR": {
       ins.register = decodeRegister_(read(0));
+
       const mode = read(1);
 
       if (mode === ASM_MODES.IMMEDIATE) {
@@ -360,6 +359,7 @@ function decodeFetchedInstruction_(type, bytes) {
       if (ins.mode === "REGISTER") {
         decodeRegister_(ins.operand);
       }
+
       break;
     }
 
@@ -379,30 +379,48 @@ function decodeFetchedInstruction_(type, bytes) {
   return ins;
 }
 
+// ------------------------------------------------------------
+// DECODE MICRO-PROGRAM
+// ------------------------------------------------------------
 
 /**
- * Creates one memory-read triplet per instruction operand:
- * T0: PC -> MAR
- * T1: RAM[MAR] -> MDR
- * T2: capture MDR in micro-context and increment PC
+ * Reads instruction operands from virtual memory.
+ * The Page Fault handler can therefore load code pages as well.
  */
 function getDecodeMicroProgram_(byteCount) {
   const steps = [];
 
   for (let i = 0; i < byteCount; i++) {
     steps.push(
-      makeMicroStep_("DECODE_T" + i + "_PC_TO_MAR", {
-        En_PC: 1,
-        Ld_MAR: 1
-      })
+      makeMicroStep_(
+        "DECODE_T" + i + "_PC_TO_MAR",
+        {
+          En_PC: 1,
+          Ld_MAR: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true,
+            virtualAddressHigh: 0
+          }
+        }
+      )
     );
 
     steps.push(
-      makeMicroStep_("DECODE_T" + i + "_MEMORY_READ", {
-        En_MAR: 1,
-        Mem_R: 1,
-        Ld_MDR: 1
-      })
+      makeMicroStep_(
+        "DECODE_T" + i + "_VIRTUAL_MEMORY_READ",
+        {
+          En_MAR: 1,
+          Mem_R: 1,
+          Ld_MDR: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true
+          }
+        }
+      )
     );
 
     const captureStep = makeMicroStep_(
@@ -420,8 +438,10 @@ function getDecodeMicroProgram_(byteCount) {
   return steps;
 }
 
+// ------------------------------------------------------------
+// MICRO-PROGRAM PREPARATION
+// ------------------------------------------------------------
 
-/** Prepares the next micro-program without executing a clock step. */
 function prepareCurrentMicroProgram_(state) {
   let guard = 0;
 
@@ -470,6 +490,7 @@ function prepareCurrentMicroProgram_(state) {
             type,
             state.microContext.instructionBytes
           );
+
           state.phase = "EXECUTE";
           continue;
         }
@@ -493,12 +514,12 @@ function prepareCurrentMicroProgram_(state) {
   }
 
   if (!state.microProgram || state.microProgram.length === 0) {
-    throw new Error("Could not prepare a valid CPU micro-program.");
+    throw new Error(
+      "Could not prepare a valid CPU micro-program."
+    );
   }
 }
 
-
-/** Moves the state machine to the next architectural phase. */
 function completeMicroProgram_(state, completedPhase, haltRequested) {
   state.microProgram = null;
   state.microIndex = 0;
@@ -532,12 +553,16 @@ function completeMicroProgram_(state, completedPhase, haltRequested) {
       break;
 
     default:
-      throw new Error("Cannot complete CPU phase: " + completedPhase);
+      throw new Error(
+        "Cannot complete CPU phase: " + completedPhase
+      );
   }
 }
 
+// ------------------------------------------------------------
+// BUS DISPLAY
+// ------------------------------------------------------------
 
-/** Human-readable bus value used by the execution trace and CPU panel. */
 function formatMicroBus_(bus) {
   if (!bus || bus.state !== "ACTIVE") {
     return "HIGH_Z";
@@ -551,46 +576,66 @@ function formatMicroBus_(bus) {
   return (bus.source || "BUS") + value;
 }
 
-/**
- * Highlights the CPU registers involved in the last micro-step.
- * Yellow = transmitter; green = receiver.
- * All other registers return to their normal background.
- * This function reuses CPU.gs highlighting API.
- */
 function highlightMicroStepRegisters_(microResult) {
-  const signals = (microResult && microResult.controlWord &&
-    microResult.controlWord.signals) || {};
+  const signals = (
+    microResult &&
+    microResult.controlWord &&
+    microResult.controlWord.signals
+  ) || {};
+
   const buses = (microResult && microResult.buses) || {};
   const internal = buses.internal || {};
-  const validNames = ["PC", "IR", "MAR", "MDR", "AX", "BX", "CX", "DX"];
+
+  const validNames = [
+    "PC", "IR", "MAR", "MDR",
+    "AX", "BX", "CX", "DX"
+  ];
+
   const senders = [];
   const receivers = [];
 
-  // The source of the internal bus drives data into a destination.
   if (validNames.indexOf(internal.source) !== -1) {
     senders.push(internal.source);
   }
-  // MAR drives the external address bus, even though it is not an internal driver.
-  if (signals.En_MAR === 1) senders.push("MAR");
-  // MDR drives the external data bus on a memory write.
-  if (signals.En_MDR === 1 && (signals.Mem_W === 1 || signals.IO_W === 1)) {
+
+  if (signals.En_MAR === 1) {
+    senders.push("MAR");
+  }
+
+  if (
+    signals.En_MDR === 1 &&
+    (signals.Mem_W === 1 || signals.IO_W === 1)
+  ) {
     senders.push("MDR");
   }
 
   validNames.forEach(function(name) {
-    if (signals["Ld_" + name] === 1) receivers.push(name);
+    if (signals["Ld_" + name] === 1) {
+      receivers.push(name);
+    }
   });
-  if (signals.Mem_R === 1 && receivers.indexOf("MDR") === -1) {
+
+  if (
+    signals.Mem_R === 1 &&
+    receivers.indexOf("MDR") === -1
+  ) {
     receivers.push("MDR");
   }
-  if (signals.Inc_PC === 1 && receivers.indexOf("PC") === -1) {
+
+  if (
+    signals.Inc_PC === 1 &&
+    receivers.indexOf("PC") === -1
+  ) {
     receivers.push("PC");
   }
 
-  // Reuse the non-destructive style restoration from CPU.gs.
-  highlightRegisters(Array.from(new Set(senders.concat(receivers))));
+  highlightRegisters(
+    Array.from(new Set(senders.concat(receivers)))
+  );
+
   const sheet = cpuSheet_();
   const C = CONFIG.COLORS;
+
   receivers.forEach(function(name) {
     if (senders.indexOf(name) === -1) {
       sheet.getRange(CPU_LAYOUT.registers[name])
@@ -600,9 +645,9 @@ function highlightMicroStepRegisters_(microResult) {
   });
 }
 
-// ============================================
+// ------------------------------------------------------------
 // EXECUTION TRACE
-// ============================================
+// ------------------------------------------------------------
 
 function appendExecutionTrace_(
   state,
@@ -632,9 +677,9 @@ function appendExecutionTrace_(
     .setFontColor(CONFIG.COLORS.white);
 }
 
-// ============================================
-// STEP
-// ============================================
+// ------------------------------------------------------------
+// CPU STEP
+// ------------------------------------------------------------
 
 function stepCpu() {
   const state = getExecutionState_();
@@ -643,7 +688,6 @@ function stepCpu() {
     return state;
   }
 
-  // Prepare the program only; this does not consume a clock step.
   if (
     !state.microProgram ||
     state.microIndex >= state.microProgram.length
@@ -658,13 +702,14 @@ function stepCpu() {
   const microStep = state.microProgram[state.microIndex];
 
   if (!microStep) {
-    throw new Error("Micro-step not found at index " + state.microIndex);
+    throw new Error(
+      "Micro-step not found at index " + state.microIndex
+    );
   }
 
-  const instructionName =
-    state.decoded
-      ? state.decoded.type
-      : state.lastInstructionType;
+  const instructionName = state.decoded
+    ? state.decoded.type
+    : state.lastInstructionType;
 
   let microResult;
 
@@ -673,16 +718,18 @@ function stepCpu() {
       microStep,
       state.microContext
     );
+
   } else {
-    // A skipped conditional micro-step still consumes one clock,
-    // but no transmitter is enabled and all buses remain HIGH-Z.
     const idleWord = createControlWord_({});
 
     microResult = {
       controlWord: idleWord,
       binary: idleWord.binary,
       activeSignals: [],
-      buses: resolveControlBuses_(idleWord, state.microContext),
+      buses: resolveControlBuses_(
+        idleWord,
+        state.microContext
+      ),
       changes: ["SKIPPED: " + microStep.condition],
       context: state.microContext,
       halt: false,
@@ -690,9 +737,10 @@ function stepCpu() {
     };
   }
 
-  // Capture each fetched instruction operand after MDR was loaded.
   if (microStep.captureInstructionByte) {
-    state.microContext.instructionBytes.push(getRegister("MDR"));
+    state.microContext.instructionBytes.push(
+      getRegister("MDR")
+    );
   }
 
   if (
@@ -708,7 +756,6 @@ function stepCpu() {
   state.lastBuses = microResult.buses;
   state.lastChanges = microResult.changes;
 
-  // Exactly one micro-operation is executed per call to stepCpu().
   state.microIndex++;
   state.steps++;
 
@@ -730,10 +777,9 @@ function stepCpu() {
 
   state.lastPhase = displayedPhase;
 
-  const changesText =
-    microResult.changes.length > 0
-      ? microResult.changes.join(" / ")
-      : "No register changes";
+  const changesText = microResult.changes.length > 0
+    ? microResult.changes.join(" / ")
+    : "No register changes";
 
   const detail =
     microResult.description +
@@ -760,7 +806,6 @@ function stepCpu() {
       : changedFlags_(flagsBefore)
   );
 
-  // Restore register highlighting for each clock micro-operation.
   highlightMicroStepRegisters_(microResult);
 
   if (typeof updateControlUnitPanel_ === "function") {
@@ -770,13 +815,11 @@ function stepCpu() {
   return state;
 }
 
-// ============================================
+// ------------------------------------------------------------
 // RUN
-// ============================================
+// ------------------------------------------------------------
 
 function runCpu() {
-  // Main.gs contains the pause-aware continuous runner.
-  // Use it when available so RUN can execute the full program.
   if (typeof edbRunContinuous_ === "function") {
     return edbRunContinuous_();
   }
@@ -791,12 +834,8 @@ function runCpu() {
   saveExecutionState_(state);
 
   const speed = String(
-    cpuSheet_()
-      .getRange("G29")
-      .getValue()
-  )
-    .trim()
-    .toLowerCase();
+    cpuSheet_().getRange("G29").getValue()
+  ).trim().toLowerCase();
 
   const delays = {
     lento: 1000,
@@ -809,7 +848,6 @@ function runCpu() {
     ? 500
     : delays[speed];
 
-  // Fallback: bounded batch of clock micro-steps.
   const maxMicroSteps = 20;
 
   for (let i = 0; i < maxMicroSteps; i++) {
@@ -820,7 +858,6 @@ function runCpu() {
     }
 
     state = stepCpu();
-
     SpreadsheetApp.flush();
 
     if (state.halted || state.paused) {
@@ -833,22 +870,19 @@ function runCpu() {
   return getExecutionState_();
 }
 
-// ============================================
+// ------------------------------------------------------------
 // PAUSE / RESUME
-// ============================================
+// ------------------------------------------------------------
 
 function pauseCpu() {
   const state = getExecutionState_();
 
   state.paused = true;
-
   saveExecutionState_(state);
 
   updateExecutionVisuals_(
     state,
-    state.lastPhase === "-"
-      ? state.phase
-      : state.lastPhase,
+    state.lastPhase === "-" ? state.phase : state.lastPhase,
     []
   );
 
@@ -863,23 +897,20 @@ function resumeCpu() {
   }
 
   state.paused = false;
-
   saveExecutionState_(state);
 
   updateExecutionVisuals_(
     state,
-    state.lastPhase === "-"
-      ? state.phase
-      : state.lastPhase,
+    state.lastPhase === "-" ? state.phase : state.lastPhase,
     []
   );
 
   return state;
 }
 
-// ============================================
+// ------------------------------------------------------------
 // RESET
-// ============================================
+// ------------------------------------------------------------
 
 function resetCpu() {
   resetCPURegisters();
@@ -891,19 +922,16 @@ function resetCpu() {
   const lastRow = trace.getLastRow();
 
   if (lastRow >= 6) {
-    trace.getRange(
-      6, 2,
-      lastRow - 5,
-      6
-    ).clearContent();
+    trace.getRange(6, 2, lastRow - 5, 6)
+      .clearContent();
   }
 
   SpreadsheetApp.flush();
 }
 
-// ============================================
-// TEST
-// ============================================
+// ------------------------------------------------------------
+// EXECUTION TESTS
+// ------------------------------------------------------------
 
 function testExecutionModule() {
   Logger.log("=== MICRO-OP EXECUTION TEST ===");
@@ -922,39 +950,40 @@ function testExecutionModule() {
   let state = getExecutionState_();
   let guard = 0;
 
-  while (!state.halted && guard < 300) {
+  while (!state.halted && guard < 350) {
     state = stepCpu();
     guard++;
   }
 
   if (!state.halted) {
-    throw new Error("HLT was not reached within 300 micro-steps.");
+    throw new Error(
+      "HLT was not reached within 350 micro-steps."
+    );
   }
 
   if (getRegister("AX") !== 8) {
     throw new Error("AX expected 8.");
   }
-  Logger.log("PASS: AX = 08h");
 
   if (getRegister("BX") !== 8) {
     throw new Error("BX expected 8.");
   }
-  Logger.log("PASS: BX = 08h");
 
   if (Read(0x80) !== 8) {
     throw new Error("RAM[80h] expected 8.");
   }
-  Logger.log("PASS: RAM[80h] = 08h");
 
-  if (state.steps !== 56) {
+  if (state.steps !== 62) {
     throw new Error(
-      "Expected 56 clock micro-steps, got " + state.steps
+      "Expected 62 clock micro-steps, got " + state.steps
     );
   }
 
-  Logger.log("PASS: 56 clock micro-steps executed");
+  Logger.log("PASS: AX = 08h");
+  Logger.log("PASS: BX = 08h");
+  Logger.log("PASS: RAM[80h] = 08h");
+  Logger.log("PASS: 62 clock micro-steps executed");
   Logger.log("PASS: CPU halted");
-  Logger.log("=== ALL MICRO-OP EXECUTION TESTS PASSED ===");
 
   return {
     passed: true,
@@ -1003,12 +1032,10 @@ function testFlagsDiagnostics() {
     getFlag("SF") === 0;
 
   if (!passed) {
-    throw new Error("Flags or ALU micro-operation integration failed.");
+    throw new Error(
+      "Flags or ALU micro-operation integration failed."
+    );
   }
-
-  Logger.log("PASS: AX=00h");
-  Logger.log("PASS: ZF=1, CF=1, SF=0");
-  Logger.log("=== FLAGS TEST PASSED ===");
 
   return {
     passed: true,
@@ -1020,18 +1047,10 @@ function testFlagsDiagnostics() {
   };
 }
 
+// ------------------------------------------------------------
+// FOUR REGISTER INTEGRATION TEST
+// ------------------------------------------------------------
 
-// ============================================
-// PHASE 2 - FOUR REGISTER INTEGRATION TEST
-// ============================================
-
-/**
- * Tests the full FETCH/DECODE/EXECUTE/STORE pipeline
- * using AX, BX, CX, DX, ALU, flags and memory.
- *
- * NOTE: Replaces the current program in code RAM,
- * resets CPU registers and clears the execution trace.
- */
 function testPhase2ExecutionModule() {
   Logger.log("=== FOUR REGISTER MICRO-OP TEST ===");
 
@@ -1057,36 +1076,38 @@ function testPhase2ExecutionModule() {
   let state = getExecutionState_();
   let guard = 0;
 
-  while (!state.halted && guard < 500) {
+  while (!state.halted && guard < 550) {
     state = stepCpu();
     guard++;
   }
 
-  if (!state.halted || state.steps !== 150) {
+  if (!state.halted || state.steps !== 156) {
     throw new Error(
-      "Expected 150 micro-steps and HLT; got " + state.steps
+      "Expected 156 micro-steps and HLT; got " + state.steps
     );
   }
-  Logger.log("PASS: 150 clock micro-steps and HLT");
 
-  const expected = { AX: 0, BX: 2, CX: 2, DX: 2 };
+  const expected = {
+    AX: 0,
+    BX: 2,
+    CX: 2,
+    DX: 2
+  };
 
-  Object.keys(expected).forEach(name => {
+  Object.keys(expected).forEach(function(name) {
     const actual = getRegister(name);
 
     if (actual !== expected[name]) {
       throw new Error(
-        name + " expected " + expected[name] + ", got " + actual
+        name + " expected " + expected[name] +
+        ", got " + actual
       );
     }
   });
 
-  Logger.log("PASS: AX, BX, CX, DX execute independently");
-
   if (Read(0x80) !== 2) {
     throw new Error("RAM[80h] must contain 02h.");
   }
-  Logger.log("PASS: STORE and LOAD through RAM[80h]");
 
   if (
     getFlag("ZF") !== 1 ||
@@ -1095,7 +1116,6 @@ function testPhase2ExecutionModule() {
   ) {
     throw new Error("CMP flags are incorrect.");
   }
-  Logger.log("PASS: ZF=1, CF=0, SF=0");
 
   if (
     getRegister("IR") !== ISA.HLT.opcode ||
@@ -1103,7 +1123,6 @@ function testPhase2ExecutionModule() {
   ) {
     throw new Error("PC or IR execution state is incorrect.");
   }
-  Logger.log("PASS: PC and IR after HLT");
 
   if (
     !isValidByte(getRegister("MAR")) ||
@@ -1111,9 +1130,12 @@ function testPhase2ExecutionModule() {
   ) {
     throw new Error("MAR or MDR is out of 8-bit range.");
   }
-  Logger.log("PASS: MAR and MDR remain 8-bit");
 
-  Logger.log("=== ALL FOUR REGISTER MICRO-OP TESTS PASSED ===");
+  Logger.log("PASS: 156 clock micro-steps and HLT.");
+  Logger.log("PASS: AX, BX, CX, DX.");
+  Logger.log("PASS: Virtual LOAD/STORE through MMU.");
+  Logger.log("PASS: CMP flags.");
+  Logger.log("PASS: PC, IR, MAR and MDR.");
 
   return {
     passed: true,
@@ -1130,5 +1152,79 @@ function testPhase2ExecutionModule() {
       CF: getFlag("CF"),
       SF: getFlag("SF")
     }
+  };
+}
+function testTask08CPUPageFaultProgram() {
+  Logger.log("=== TASK 08 CPU PAGE FAULT PROGRAM ===");
+
+  const lines = [
+    "MOV AX, A5h",
+    "STORE [100h], AX",
+    "STORE [120h], AX",
+    "STORE [140h], AX",
+    "STORE [160h], AX",
+    "STORE [180h], AX",
+    "STORE [1A0h], AX",
+    "STORE [1C0h], AX",
+    "STORE [1E0h], AX",
+    "LOAD BX, [100h]",
+    "HLT"
+  ];
+
+  const program = assembleProgram(lines);
+  loadProgram(program);
+
+  let state = getExecutionState_();
+  let guard = 0;
+
+  while (!state.halted && guard < 5000) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (!state.halted) {
+    throw new Error(
+      "CPU did not reach HLT. Steps: " + state.steps
+    );
+  }
+
+  if (getRegister("BX") !== 0xA5) {
+    throw new Error(
+      "Swap preservation failed. Expected BX=A5h, got " +
+      byteToHex_(getRegister("BX")) + "h"
+    );
+  }
+
+  const stats = getPagingStatistics();
+
+  if (stats.pageFaults < 8) {
+    throw new Error(
+      "The program did not generate enough Page Faults."
+    );
+  }
+
+  if (stats.replacements < 1) {
+    throw new Error(
+      "The program did not perform page replacement."
+    );
+  }
+
+  if (stats.swapWrites < 1) {
+    throw new Error(
+      "No dirty page was written to Swap."
+    );
+  }
+
+  Logger.log("PASS: CPU reached HLT.");
+  Logger.log("PASS: Page Faults generated.");
+  Logger.log("PASS: FIFO replacement executed.");
+  Logger.log("PASS: Dirty pages written to Swap.");
+  Logger.log("PASS: BX preserved A5h after Swap.");
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    BX: getRegister("BX"),
+    paging: stats
   };
 }
