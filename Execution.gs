@@ -551,6 +551,55 @@ function formatMicroBus_(bus) {
   return (bus.source || "BUS") + value;
 }
 
+/**
+ * Highlights the CPU registers involved in the last micro-step.
+ * Yellow = transmitter; green = receiver.
+ * All other registers return to their normal background.
+ * This function reuses CPU.gs highlighting API.
+ */
+function highlightMicroStepRegisters_(microResult) {
+  const signals = (microResult && microResult.controlWord &&
+    microResult.controlWord.signals) || {};
+  const buses = (microResult && microResult.buses) || {};
+  const internal = buses.internal || {};
+  const validNames = ["PC", "IR", "MAR", "MDR", "AX", "BX", "CX", "DX"];
+  const senders = [];
+  const receivers = [];
+
+  // The source of the internal bus drives data into a destination.
+  if (validNames.indexOf(internal.source) !== -1) {
+    senders.push(internal.source);
+  }
+  // MAR drives the external address bus, even though it is not an internal driver.
+  if (signals.En_MAR === 1) senders.push("MAR");
+  // MDR drives the external data bus on a memory write.
+  if (signals.En_MDR === 1 && (signals.Mem_W === 1 || signals.IO_W === 1)) {
+    senders.push("MDR");
+  }
+
+  validNames.forEach(function(name) {
+    if (signals["Ld_" + name] === 1) receivers.push(name);
+  });
+  if (signals.Mem_R === 1 && receivers.indexOf("MDR") === -1) {
+    receivers.push("MDR");
+  }
+  if (signals.Inc_PC === 1 && receivers.indexOf("PC") === -1) {
+    receivers.push("PC");
+  }
+
+  // Reuse the non-destructive style restoration from CPU.gs.
+  highlightRegisters(Array.from(new Set(senders.concat(receivers))));
+  const sheet = cpuSheet_();
+  const C = CONFIG.COLORS;
+  receivers.forEach(function(name) {
+    if (senders.indexOf(name) === -1) {
+      sheet.getRange(CPU_LAYOUT.registers[name])
+        .setBackground(C.green)
+        .setFontColor(C.background);
+    }
+  });
+}
+
 // ============================================
 // EXECUTION TRACE
 // ============================================
@@ -706,8 +755,13 @@ function stepCpu() {
   updateExecutionVisuals_(
     state,
     displayedPhase,
-    changedFlags_(flagsBefore)
+    microResult.controlWord.signals.Ld_FLAGS === 1
+      ? CONFIG.CPU.flags.slice()
+      : changedFlags_(flagsBefore)
   );
+
+  // Restore register highlighting for each clock micro-operation.
+  highlightMicroStepRegisters_(microResult);
 
   if (typeof updateControlUnitPanel_ === "function") {
     updateControlUnitPanel_(state);
