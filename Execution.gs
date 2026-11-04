@@ -1,4 +1,4 @@
-/**
+﻿/**
  * EitoDiceBanana CPU Simulator
  * Execution Engine — Phase 2 / Task 08
  *
@@ -915,6 +915,10 @@ function resumeCpu() {
 function resetCpu() {
   resetCPURegisters();
   resetExecutionState();
+
+  if (typeof resetCacheModule === "function") {
+    resetCacheModule();
+  }
 
   const trace = SpreadsheetApp.getActive()
     .getSheetByName("TRAZA");
