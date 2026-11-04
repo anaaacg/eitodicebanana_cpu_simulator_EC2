@@ -44,6 +44,8 @@ function createPagingStateFromRAM_() {
     nextSequence: VM_PHYSICAL_FRAME_COUNT,
     loadedAt: loadedAt,
     pageData: pageData,
+    // Immutable baseline captured when a new program is loaded.
+    initialPages: JSON.parse(JSON.stringify(pageData)),
     swapPages: {},
     pageFaults: 0,
     replacements: 0,
@@ -106,6 +108,9 @@ function getPagingState_() {
 function resetPagingBackingStore_() {
   const paging = createPagingStateFromRAM_();
   savePagingState_(paging);
+  if (typeof resetCacheModule === "function") {
+    resetCacheModule();
+  }
   return paging;
 }
 
@@ -119,6 +124,11 @@ function resetPagingSystem() {
 
   const paging = createPagingStateFromRAM_();
   savePagingState_(paging);
+
+  // A newly loaded program changes RAM bytes. Old cache tags must go.
+  if (typeof resetCacheModule === "function") {
+    resetCacheModule();
+  }
 
   try {
     syncPageTableDisplay();
@@ -139,6 +149,71 @@ function resetPagingSystem() {
     frames: VM_PHYSICAL_FRAME_COUNT,
     pageSize: VIRTUAL_PAGE_SIZE
   };
+}
+
+/**
+ * CPU RESET: restores the original physical layout of the loaded program.
+ * IMPORTANT: RAM might contain different virtual pages after FIFO swapping,
+ * so resetting the page table alone would corrupt the mapping. Restore
+ * the initial 8 page images before mapping VPN 0..7 -> PFN 0..7.
+ *
+ * RESET starts a fresh execution, unlike PAUSE/RESUME. Runtime modifications
+ * and swap contents are discarded; the loaded program and initial data remain.
+ */
+function resetPagingForCpu_() {
+  const previous = getPagingState_();
+  const baseline = previous.initialPages || previous.pageData;
+
+  // Validate the complete image before writing any RAM cells.
+  for (let frame = 0; frame < VM_PHYSICAL_FRAME_COUNT; frame++) {
+    validatePagingPageBytes_(baseline[frame], 'RESET page ' + frame);
+  }
+
+  // RESET restores the loaded program's baseline in physical RAM,
+  // therefore all cached blocks must be discarded first.
+  if (typeof resetCacheModule === "function") {
+    resetCacheModule();
+  }
+
+  for (let frame = 0; frame < VM_PHYSICAL_FRAME_COUNT; frame++) {
+    writePageToPhysicalFrame_(frame, baseline[frame]);
+  }
+
+  const fresh = {
+    version: 1,
+    policy: PAGING_POLICY,
+    nextSequence: VM_PHYSICAL_FRAME_COUNT,
+    loadedAt: {},
+    pageData: JSON.parse(JSON.stringify(baseline)),
+    initialPages: JSON.parse(JSON.stringify(baseline)),
+    swapPages: {},
+    pageFaults: 0,
+    replacements: 0,
+    swapWrites: 0,
+    swapReads: 0
+  };
+
+  for (let vpn = 0; vpn < VM_PHYSICAL_FRAME_COUNT; vpn++) {
+    fresh.loadedAt[vpn] = vpn;
+  }
+  savePagingState_(fresh);
+  savePageTable_(defaultPageTableState_());
+  syncPageTableDisplay();
+  clearPagingEventLog_();
+  resetMMUMonitorDisplay_();
+  Logger.log('RESET: Physical frames, Page Table, FIFO and Swap restored.');
+  return fresh;
+}
+
+/** Clears only paging events. Never clears the PAGINAS sheet. */
+function clearPagingEventLog_() {
+  const sheet = paginasSheet_();
+  const C = CONFIG.COLORS;
+  ensurePagingEventPanel_();
+  const range = sheet.getRange(PAGING_EVENT_START_ROW, 10, PAGING_EVENT_COUNT, 5);
+  range.clearContent().setBackground(C.panel).setFontColor(C.white);
+  sheet.getRange(PAGING_EVENT_START_ROW, 10, PAGING_EVENT_COUNT, 1)
+    .setNumberFormat('HH:mm:ss');
 }
 
 // ------------------------------------------------------------
@@ -269,6 +344,13 @@ function ensurePagingEventPanel_() {
     .setFontColor(C.yellow)
     .setFontWeight("bold");
 
+  // Make EVENT and DETAIL fully readable.
+  sheet.setColumnWidth(10, 105); // J time
+  sheet.setColumnWidth(11, 165); // K event
+  sheet.setColumnWidth(12, 105); // L VPN / MMU values
+  sheet.setColumnWidth(13, 75);  // M PFN
+  sheet.setColumnWidth(14, 405); // N detail
+
   sheet.getRange("J27:N27")
     .setValues([[
       "TIME",
@@ -319,26 +401,32 @@ function logPagingEvent_(eventName, vpn, pfn, detail) {
       events.unshift(["", "", "", "", ""]);
     }
 
+    // Reapply event-specific colors to every row; previous faults remain red.
+    const backgrounds = [];
+    const fontColors = [];
+    events.forEach(function(event) {
+      const name = String(event[1] || '').toUpperCase();
+      const bg = Array(5).fill(C.panel);
+      const fg = Array(5).fill(C.white);
+      if (name === 'PAGE FAULT') {
+        bg[1] = C.red;
+        fg[1] = C.background;
+      } else if (name === 'FIFO VICTIM' || name === 'SWAP OUT') {
+        bg[1] = C.yellow;
+        fg[1] = C.background;
+      } else if (name === 'PAGE LOADED' || name === 'SWAP IN') {
+        bg[1] = C.green;
+        fg[1] = C.background;
+      }
+      backgrounds.push(bg);
+      fontColors.push(fg);
+    });
     range.setValues(events);
-    range.setFontColor(C.white);
-    range.setBackground(C.panel);
-    range.setVerticalAlignment("middle");
-
-    sheet.getRange(
-      PAGING_EVENT_START_ROW,
-      10,
-      PAGING_EVENT_COUNT,
-      1
-    ).setNumberFormat("HH:mm:ss");
-
-    const lastRow = PAGING_EVENT_START_ROW + PAGING_EVENT_COUNT - 1;
-    const eventCell = sheet.getRange(lastRow, 11);
-
-    if (String(eventName).toUpperCase() === "PAGE FAULT") {
-      eventCell.setBackground(C.red).setFontColor(C.background);
-    } else if (String(eventName).toUpperCase().indexOf("SWAP") !== -1) {
-      eventCell.setBackground(C.yellow).setFontColor(C.background);
-    }
+    range.setBackgrounds(backgrounds);
+    range.setFontColors(fontColors);
+    range.setVerticalAlignment('middle');
+    sheet.getRange(PAGING_EVENT_START_ROW, 10, PAGING_EVENT_COUNT, 1)
+      .setNumberFormat('HH:mm:ss');
 
     SpreadsheetApp.flush();
 
@@ -520,6 +608,13 @@ function handlePageFault_(faultInfo) {
 
   validatePagingPageBytes_(pageBytes, "Requested virtual page");
 
+  // A PFN is a physical address: after reuse it could contain cached
+  // lines belonging to the evicted VPN. Invalidate BEFORE overwriting RAM.
+  // Write-through ensures dirty victim bytes were already committed to RAM.
+  if (typeof invalidateCachePhysicalFrame === "function") {
+    invalidateCachePhysicalFrame(frame);
+  }
+
   // Transfer the entire 32-byte page into the selected frame.
   writePageToPhysicalFrame_(frame, pageBytes);
 
@@ -610,6 +705,8 @@ function testTask08PagingModule() {
 
   const oldPageTable = props.getProperty(PAGE_TABLE_KEY);
   const oldPagingState = props.getProperty(PAGING_STATE_KEY);
+  const oldCacheState = typeof CACHE_STATE_KEY !== "undefined"
+    ? props.getProperty(CACHE_STATE_KEY) : null;
 
   const ramSnapshot = [];
 
@@ -723,7 +820,16 @@ function testTask08PagingModule() {
       props.setProperty(PAGING_STATE_KEY, oldPagingState);
     }
 
+    if (typeof CACHE_STATE_KEY !== "undefined") {
+      if (oldCacheState === null) props.deleteProperty(CACHE_STATE_KEY);
+      else props.setProperty(CACHE_STATE_KEY, oldCacheState);
+    }
+
     try {
+      if (typeof syncCacheDashboard_ === "function") {
+        syncCacheDashboard_(oldCacheState ?
+          JSON.parse(oldCacheState) : defaultCacheState_());
+      }
       syncPageTableDisplay();
       SpreadsheetApp.flush();
     } catch (error) {
