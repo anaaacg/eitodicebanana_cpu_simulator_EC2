@@ -104,7 +104,7 @@ const CONFIG = {
     execution: true,
 
     buses: true,
-    cache: false,
+    cache: true,
     mmu: true,
     io: false
   },
