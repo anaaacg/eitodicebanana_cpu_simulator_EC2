@@ -320,8 +320,11 @@ function translateVirtualAddress(virtualAddress, isWrite) {
  * 2. The paging handler loads the required page.
  * 3. The MMU translates the same address again.
  * 4. The interrupted read completes.
+ *
+ * Optional accessType: "INSTRUCTION" or "DATA".
+ * When omitted, FETCH/DECODE are instruction reads; otherwise data.
  */
-function readVirtualMemory(virtualAddress) {
+function readVirtualMemory(virtualAddress, accessType) {
   let translation = translateVirtualAddress(
     virtualAddress,
     false
@@ -347,6 +350,35 @@ function readVirtualMemory(virtualAddress) {
     );
   }
 
+  // CPU FETCH/DECODE -> L1I; LOAD and direct API calls -> L1D.
+  // The optional accessType makes explicit instruction reads testable.
+  // ControlUnit.gs currently calls readVirtualMemory(address) without it,
+  // so we infer FETCH/DECODE from the saved execution phase.
+  let kind = String(accessType || "").toUpperCase();
+  if (!kind) {
+    kind = "DATA";
+    if (typeof getExecutionState_ === "function") {
+      const execution = getExecutionState_();
+      if (execution &&
+          (execution.phase === "FETCH" || execution.phase === "DECODE")) {
+        kind = "INSTRUCTION";
+      }
+    }
+  }
+
+  if (kind !== "DATA" && kind !== "INSTRUCTION") {
+    throw new Error("Invalid virtual memory access type: " + kind);
+  }
+
+  if (kind === "INSTRUCTION" &&
+      typeof cacheReadInstruction === "function") {
+    return cacheReadInstruction(translation.physicalAddress);
+  }
+  if (kind === "DATA" && typeof cacheReadData === "function") {
+    return cacheReadData(translation.physicalAddress);
+  }
+
+  // Legacy compatibility when Cache.gs has not been installed.
   return Read(translation.physicalAddress);
 }
 
@@ -388,7 +420,13 @@ function writeVirtualMemory(virtualAddress, value) {
     );
   }
 
-  Write(translation.physicalAddress, value);
+  // Write-through + write-allocate: L1D -> L2 -> physical RAM.
+  // Cache.gs also invalidates L1I for self-modifying code.
+  if (typeof cacheWriteData === "function") {
+    cacheWriteData(translation.physicalAddress, value);
+  } else {
+    Write(translation.physicalAddress, value);
+  }
 }
 
 // ------------------------------------------------------------
@@ -480,8 +518,9 @@ function renderVirtualMemoryDashboard() {
   const sheet = paginasSheet_();
   const C = CONFIG.COLORS;
 
-  sheet.clear();
-  sheet.getRange("A1:Z60").setBackground(C.background);
+  // Re-render only the defined dashboard area, preserving paging event rows.
+  // Do not call sheet.clear(): it would erase the event log and user content.
+  sheet.getRange("A1:Z25").setBackground(C.background);
 
   function header(range, title) {
     sheet.getRange(range).merge()
@@ -722,15 +761,29 @@ function updateMMUMonitorDisplay_(info) {
 
   const statusCell = sheet.getRange(M.status);
 
+  const fault = info.status === "PAGE_FAULT";
   statusCell
     .setValue(info.status || "-")
-    .setFontColor(
-      info.status === "TRANSLATED"
-        ? C.green
-        : info.status === "PAGE_FAULT"
-          ? C.red
-          : C.muted
-    );
+    .setBackground(fault ? C.red : C.panel)
+    .setFontColor(fault ? C.background :
+      (info.status === "TRANSLATED" ? C.green : C.muted))
+    .setFontWeight("bold");
+}
+
+/** Restore MMU readout to READY without destroying the page table. */
+function resetMMUMonitorDisplay_() {
+  const sheet = paginasSheet_();
+  const M = PAGINAS_LAYOUT.monitor;
+  const C = CONFIG.COLORS;
+  [M.virtualAddress, M.vpn, M.offset, M.pfn, M.physicalAddress,
+   M.operation].forEach(function(cell) {
+    sheet.getRange(cell).setValue('--').setFontColor(C.white)
+      .setBackground(C.panel);
+  });
+  sheet.getRange(M.operation).setValue('-');
+  sheet.getRange(M.status).setValue('READY')
+    .setBackground(C.panel).setFontColor(C.green)
+    .setFontWeight('bold');
 }
 
 // ------------------------------------------------------------
@@ -994,4 +1047,97 @@ function testVirtualMemoryModule() {
     pageSize: VIRTUAL_PAGE_SIZE,
     physicalFrames: VM_PHYSICAL_FRAME_COUNT
   };
+}
+
+// ------------------------------------------------------------
+// TASK 09: MMU <-> CACHE INTEGRATION TEST
+// ------------------------------------------------------------
+
+/**
+ * Tests real cache access after virtual-to-physical translation,
+ * including CPU-style instruction reads, data write-through, and
+ * page-replacement cache invalidation.
+ *
+ * Run in a COPY of the simulator with CPU stopped. All RAM pages
+ * and page/cache metadata are restored in finally.
+ */
+function testTask09VirtualCacheIntegration() {
+  if (typeof cacheReadInstruction !== "function" ||
+      typeof cacheReadData !== "function" ||
+      typeof cacheWriteData !== "function") {
+    throw new Error("Task 09 requires the installed Cache.gs module.");
+  }
+
+  const props = PropertiesService.getDocumentProperties();
+  const keys = [PAGE_TABLE_KEY, PAGING_STATE_KEY, CACHE_STATE_KEY];
+  const saved = {};
+  keys.forEach(function(key) { saved[key] = props.getProperty(key); });
+  const frames = [];
+  for (let f = 0; f < VM_PHYSICAL_FRAME_COUNT; f++) {
+    frames.push(getPhysicalFrame(f).bytes.slice());
+  }
+  const assert = function(ok, message) {
+    if (!ok) throw new Error("TASK 09 INTEGRATION: " + message);
+  };
+
+  Logger.log("=== TASK 09 VIRTUAL CACHE INTEGRATION ===");
+  try {
+    resetPagingSystem();
+
+    // Instruction reads: first misses, repeated byte hits L1I.
+    const op1 = readVirtualMemory(0x00, "INSTRUCTION");
+    const op2 = readVirtualMemory(0x00, "INSTRUCTION");
+    assert(op1 === op2, "Instruction bytes differ");
+    let stats = getCacheStatistics();
+    assert(stats.l1iMisses >= 1 && stats.l1iHits >= 1,
+      "FETCH must use L1I");
+    Logger.log("PASS: Instruction fetch uses L1I MISS/HIT");
+
+    // Data access: write must reach actual physical RAM.
+    writeVirtualMemory(0x85, 0xA5);
+    const data = readVirtualMemory(0x85, "DATA");
+    assert(data === 0xA5 && readRawMemory_(0x85) === 0xA5,
+      "Virtual write-through consistency failed");
+    stats = getCacheStatistics();
+    assert(stats.l1dHits >= 1 && stats.writes >= 1,
+      "LOAD/STORE must use L1D");
+    Logger.log("PASS: Data LOAD/STORE uses L1D and physical RAM");
+
+    // Page 8 is initially non-resident; FIFO overwrites frame 0.
+    // L1I cached block 0 of frame 0, and must become invalid.
+    readVirtualMemory(0x100, "DATA");
+    const newState = getCacheContents();
+    assert(newState.l1i.valid === 0,
+      "Frame replacement must invalidate L1I");
+    const page8 = getPageTable_().entries[8];
+    assert(page8.present === 1 && page8.pfn === 0,
+      "Page 8 should replace initial page 0 in frame 0");
+    Logger.log("PASS: FIFO replacement invalidates affected cache lines");
+
+    Logger.log("=== ALL TASK 09 VIRTUAL CACHE TESTS PASSED ===");
+    return { passed: true, cache: getCacheStatistics() };
+  } finally {
+    // Restore physical bytes before reestablishing previous mappings.
+    if (typeof resetCacheModule === "function") {
+      resetCacheModule();
+    }
+    for (let f = 0; f < VM_PHYSICAL_FRAME_COUNT; f++) {
+      writePageToPhysicalFrame_(f, frames[f]);
+    }
+    keys.forEach(function(key) {
+      if (saved[key] === null) props.deleteProperty(key);
+      else props.setProperty(key, saved[key]);
+    });
+    try {
+      syncPageTableDisplay();
+      if (saved[CACHE_STATE_KEY] !== null) {
+        syncCacheDashboard_(JSON.parse(saved[CACHE_STATE_KEY]));
+      } else {
+        syncCacheDashboard_(defaultCacheState_());
+      }
+    } catch (e) {
+      Logger.log("Dashboard refresh after restore: " + e.message);
+    }
+    Logger.log("Original RAM, Page Table, Paging and Cache states restored");
+  }
 }
