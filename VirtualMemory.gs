@@ -498,16 +498,16 @@ function renderVirtualMemoryDashboard() {
   // Section 3: Architecture Summary
   header("J17:N17", "3. ARCHITECTURE SPECIFICATIONS");
   const specs = [
-    ["J19", "Virtual Space:"],      ["L19", "512 Bytes (000h - 1FFh)"],
-    ["J20", "Virtual Pages:"],      ["L20", "16 Pages (32 Bytes each)"],
-    ["J21", "Physical RAM:"],       ["L21", "256 Bytes (8 Frames of 32B)"],
-    ["J22", "Address Bits:"],       ["L22", "9-Bit Virtual = 4b VPN + 5b Offset"],
-    ["J23", "Physical Bits:"],      ["L23", "8-Bit Phys = 3b PFN + 5b Offset"]
+    ["J19", "Virtual Space:", "L19", "512 Bytes (000h - 1FFh)"],
+    ["J20", "Virtual Pages:", "L20", "16 Pages (32 Bytes each)"],
+    ["J21", "Physical RAM:",  "L21", "256 Bytes (8 Frames of 32B)"],
+    ["J22", "Address Bits:",  "L22", "9-Bit Virtual = 4b VPN + 5b Offset"],
+    ["J23", "Physical Bits:", "L23", "8-Bit Phys = 3b PFN + 5b Offset"]
   ];
 
   specs.forEach(item => {
     sheet.getRange(item[0]).setValue(item[1]).setFontColor(C.muted).setFontWeight("bold");
-    sheet.getRange(item[1]).setValue(item[2]).setFontColor(C.white);
+    sheet.getRange(item[2]).setValue(item[3]).setFontColor(C.white);
   });
 
   SpreadsheetApp.flush();
