@@ -1,27 +1,20 @@
-
 /**
  * EitoDiceBanana CPU Simulator
- * Assembler Module - Phase 2
+ * Assembler Module — Phase 2 / Task 08
  *
- * Converts ASM instructions into machine code.
- * Loads programs into 256-byte RAM.
- *
- * General-purpose registers:
- * AX = 00h, BX = 01h, CX = 02h, DX = 03h
- *
- * Code segment: 00h - 7Fh
- * Data segment: 80h - FFh
+ * Virtual addresses: 000h - 1FFh (9 bits).
+ * Physical RAM remains 256 bytes.
  */
 
-// ============================================
-// INSTRUCTION SET (ISA)
-// ============================================
+// ------------------------------------------------------------
+// INSTRUCTION SET
+// ------------------------------------------------------------
 
 const ISA = {
   MOV_IMM: { opcode: 0x01, bytes: 4 },
   MOV_REG: { opcode: 0x02, bytes: 3 },
-  LOAD:    { opcode: 0x03, bytes: 3 },
-  STORE:   { opcode: 0x04, bytes: 3 },
+  LOAD:    { opcode: 0x03, bytes: 4 },
+  STORE:   { opcode: 0x04, bytes: 4 },
 
   ADD: { opcode: 0x10, bytes: 4 },
   SUB: { opcode: 0x11, bytes: 4 },
@@ -41,8 +34,6 @@ const ISA = {
   HLT: { opcode: 0xFF, bytes: 1 }
 };
 
-// Register encoding is backward compatible
-// with the Phase 1 architecture.
 const ASM_REGISTERS = {
   AX: 0x00,
   BX: 0x01,
@@ -55,19 +46,18 @@ const ASM_MODES = {
   IMMEDIATE: 0x01
 };
 
-// ============================================
+// ------------------------------------------------------------
 // UTILITIES
-// ============================================
+// ------------------------------------------------------------
 
 function asmRegisterCode_(name) {
   const key = String(name).trim().toUpperCase();
 
   if (!Object.prototype.hasOwnProperty.call(
-    ASM_REGISTERS, key
+    ASM_REGISTERS,
+    key
   )) {
-    throw new Error(
-      "Invalid register: " + name
-    );
+    throw new Error("Invalid register: " + name);
   }
 
   return ASM_REGISTERS[key];
@@ -87,14 +77,43 @@ function asmParseNumber_(text) {
     result = parseInt(value, 10);
 
   } else {
-    throw new Error(
-      "Invalid numeric value: " + text
-    );
+    throw new Error("Invalid numeric value: " + text);
   }
 
   if (!isValidByte(result)) {
+    throw new Error("Value out of 8-bit range: " + text);
+  }
+
+  return result;
+}
+
+/**
+ * Parses a 9-bit virtual address, from 0 to 511.
+ * Accepted forms: 256, 1FFh, 0x1FF.
+ */
+function asmParseVirtualAddress_(text) {
+  const value = String(text).trim().toUpperCase();
+  let result;
+
+  if (/^0X[0-9A-F]+$/.test(value)) {
+    result = parseInt(value.substring(2), 16);
+
+  } else if (/^[0-9A-F]+H$/.test(value)) {
+    result = parseInt(value.slice(0, -1), 16);
+
+  } else if (/^\d+$/.test(value)) {
+    result = parseInt(value, 10);
+
+  } else {
     throw new Error(
-      "Value out of 8-bit range: " + text
+      "Invalid virtual address: " + text
+    );
+  }
+
+  if (!Number.isInteger(result) || result < 0 || result > 511) {
+    throw new Error(
+      "Virtual address out of range: " + text +
+      ". Expected 0-511 (000h-1FFh)."
     );
   }
 
@@ -126,9 +145,9 @@ function asmEncodeValue_(value) {
   ];
 }
 
-// ============================================
+// ------------------------------------------------------------
 // ASSEMBLE ONE INSTRUCTION
-// ============================================
+// ------------------------------------------------------------
 
 function assembleInstruction(line) {
   const source = asmRemoveComment_(line).toUpperCase();
@@ -167,28 +186,36 @@ function assembleInstruction(line) {
     ];
   }
 
-  // LOAD register, [address]
+  // LOAD register, [9-bit virtual address]
+  // Encoding: opcode, register, addressHigh, addressLow
   match = source.match(
     /^LOAD\s+(AX|BX|CX|DX)\s*,\s*\[(.+)\]$/
   );
 
   if (match) {
+    const address = asmParseVirtualAddress_(match[2]);
+
     return [
       ISA.LOAD.opcode,
       asmRegisterCode_(match[1]),
-      asmParseNumber_(match[2])
+      (address >> 8) & 0x01,
+      address & 0xFF
     ];
   }
 
-  // STORE [address], register
+  // STORE [9-bit virtual address], register
+  // Encoding: opcode, addressHigh, addressLow, register
   match = source.match(
     /^STORE\s*\[(.+)\]\s*,\s*(AX|BX|CX|DX)$/
   );
 
   if (match) {
+    const address = asmParseVirtualAddress_(match[1]);
+
     return [
       ISA.STORE.opcode,
-      asmParseNumber_(match[1]),
+      (address >> 8) & 0x01,
+      address & 0xFF,
       asmRegisterCode_(match[2])
     ];
   }
@@ -235,33 +262,27 @@ function assembleInstruction(line) {
     ];
   }
 
-  throw new Error(
-    "Unknown instruction: " + source
-  );
+  throw new Error("Unknown instruction: " + source);
 }
 
-// ============================================
+// ------------------------------------------------------------
 // ASSEMBLE COMPLETE PROGRAM
-// ============================================
+// ------------------------------------------------------------
 
 function assembleProgram(lines) {
   if (!Array.isArray(lines)) {
-    throw new Error(
-      "Program must be an array."
-    );
+    throw new Error("Program must be an array.");
   }
 
   const program = [];
 
-  lines.forEach((line, index) => {
+  lines.forEach(function(line, index) {
     try {
       const bytes = assembleInstruction(line);
 
-      bytes.forEach(byte => {
+      bytes.forEach(function(byte) {
         if (!isValidByte(byte)) {
-          throw new Error(
-            "Invalid encoded byte."
-          );
+          throw new Error("Invalid encoded byte.");
         }
 
         program.push(byte);
@@ -269,16 +290,13 @@ function assembleProgram(lines) {
 
     } catch (error) {
       throw new Error(
-        "ASM line " + (index + 1) +
-        ": " + error.message
+        "ASM line " + (index + 1) + ": " + error.message
       );
     }
   });
 
   if (program.length === 0) {
-    throw new Error(
-      "Program is empty."
-    );
+    throw new Error("Program is empty.");
   }
 
   const maxCodeSize =
@@ -295,24 +313,21 @@ function assembleProgram(lines) {
   return program;
 }
 
-// ============================================
+// ------------------------------------------------------------
 // LOAD PROGRAM INTO RAM
-// ============================================
+// ------------------------------------------------------------
 
-function loadProgram(program, startAddress = 0x00) {
-  if (
-    !Array.isArray(program) ||
-    program.length === 0
-  ) {
-    throw new Error(
-      "Invalid or empty program."
-    );
+function loadProgram(program, startAddress) {
+  if (startAddress === undefined) {
+    startAddress = 0x00;
+  }
+
+  if (!Array.isArray(program) || program.length === 0) {
+    throw new Error("Invalid or empty program.");
   }
 
   if (!isValidAddress(startAddress)) {
-    throw new Error(
-      "Invalid start address."
-    );
+    throw new Error("Invalid start address.");
   }
 
   if (
@@ -325,7 +340,7 @@ function loadProgram(program, startAddress = 0x00) {
     );
   }
 
-  program.forEach((byte, index) => {
+  program.forEach(function(byte, index) {
     if (!isValidByte(byte)) {
       throw new Error(
         "Invalid byte at index " + index
@@ -338,17 +353,15 @@ function loadProgram(program, startAddress = 0x00) {
     .getSheetByName("MEMORIA");
 
   if (!ram) {
-    throw new Error(
-      "MEMORIA sheet not found."
-    );
+    throw new Error("MEMORIA sheet not found.");
   }
 
   // Clear the code segment only.
-  // Preserve the data segment.
-
   const emptyCode = Array.from(
     { length: 8 },
-    () => Array(16).fill("00")
+    function() {
+      return Array(16).fill("00");
+    }
   );
 
   ram.getRange(6, 2, 8, 16)
@@ -357,9 +370,8 @@ function loadProgram(program, startAddress = 0x00) {
 
   const codeBytes = Array(128).fill("00");
 
-  program.forEach((byte, index) => {
-    codeBytes[startAddress + index] =
-      byteToHex_(byte);
+  program.forEach(function(byte, index) {
+    codeBytes[startAddress + index] = byteToHex_(byte);
   });
 
   const matrix = [];
@@ -376,9 +388,13 @@ function loadProgram(program, startAddress = 0x00) {
 
   clearMemoryHighlight();
 
-  // Reset CPU and execution state.
-  // Do not erase RAM.
+  // Reinitialize Page Table and backing storage from the
+  // real contents of the physical frames after loading code.
+  if (typeof resetPagingSystem === "function") {
+    resetPagingSystem();
+  }
 
+  // Reset CPU and execution state.
   resetCPURegisters();
   resetExecutionState();
 
@@ -387,9 +403,9 @@ function loadProgram(program, startAddress = 0x00) {
   return program.length;
 }
 
-// ============================================
+// ------------------------------------------------------------
 // LOAD PROGRAM FROM ASM SHEET
-// ============================================
+// ------------------------------------------------------------
 
 function loadProgramFromInterface() {
   const sheet = SpreadsheetApp
@@ -397,9 +413,7 @@ function loadProgramFromInterface() {
     .getSheetByName("ASM");
 
   if (!sheet) {
-    throw new Error(
-      "ASM sheet not found."
-    );
+    throw new Error("ASM sheet not found.");
   }
 
   try {
@@ -409,16 +423,11 @@ function loadProgramFromInterface() {
       .flat();
 
     const program = assembleProgram(lines);
-
     const count = loadProgram(program, 0x00);
 
     sheet.getRange("D42")
-      .setValue(
-        "LOADED - " + count + " BYTES"
-      )
-      .setFontColor(
-        CONFIG.COLORS.green
-      );
+      .setValue("LOADED - " + count + " BYTES")
+      .setFontColor(CONFIG.COLORS.green);
 
     SpreadsheetApp.getUi().alert(
       "Program loaded successfully.\n" +
@@ -428,27 +437,21 @@ function loadProgramFromInterface() {
   } catch (error) {
     sheet.getRange("D42")
       .setValue("ERROR")
-      .setFontColor(
-        CONFIG.COLORS.red
-      );
+      .setFontColor(CONFIG.COLORS.red);
 
     SpreadsheetApp.getUi().alert(
-      "Assembler error:\n" +
-      error.message
+      "Assembler error:\n" + error.message
     );
   }
 }
 
-// ============================================
-// ASSEMBLER TESTS - PHASE 2
-// ============================================
+// ------------------------------------------------------------
+// ASSEMBLER TESTS
+// ------------------------------------------------------------
 
 function testAssemblerModule() {
-  Logger.log(
-    "=== PHASE 2 ASSEMBLER TEST ==="
-  );
+  Logger.log("=== PHASE 2 / TASK 08 ASSEMBLER TEST ===");
 
-  // Test 1: Four register codes.
   const codes = {
     AX: 0x00,
     BX: 0x01,
@@ -456,172 +459,147 @@ function testAssemblerModule() {
     DX: 0x03
   };
 
-  Object.keys(codes).forEach(reg => {
-    if (
-      asmRegisterCode_(reg) !== codes[reg]
-    ) {
+  Object.keys(codes).forEach(function(reg) {
+    if (asmRegisterCode_(reg) !== codes[reg]) {
       throw new Error(
         "Register encoding failed: " + reg
       );
     }
   });
 
-  Logger.log(
-    "PASS: AX, BX, CX, DX register codes"
-  );
+  Logger.log("PASS: AX, BX, CX, DX register codes.");
 
-  // Test 2: MOV immediate.
-  const movCX = assembleInstruction(
-    "MOV CX, 05h"
-  );
+  const movCX = assembleInstruction("MOV CX, 05h");
 
   if (
     JSON.stringify(movCX) !==
     JSON.stringify([0x01, 0x02, 0x01, 0x05])
   ) {
-    throw new Error(
-      "MOV CX immediate failed."
-    );
+    throw new Error("MOV CX immediate failed.");
   }
 
-  Logger.log(
-    "PASS: MOV CX, immediate"
-  );
+  Logger.log("PASS: MOV immediate.");
 
-  // Test 3: MOV register to register.
-  const movDX = assembleInstruction(
-    "MOV DX, CX"
-  );
+  const movDX = assembleInstruction("MOV DX, CX");
 
   if (
     JSON.stringify(movDX) !==
     JSON.stringify([0x02, 0x03, 0x02])
   ) {
-    throw new Error(
-      "MOV DX, CX failed."
-    );
+    throw new Error("MOV DX, CX failed.");
   }
 
-  Logger.log(
-    "PASS: MOV DX, CX"
-  );
+  Logger.log("PASS: MOV register.");
 
-  // Test 4: Arithmetic registers.
-  const add = assembleInstruction(
-    "ADD CX, DX"
-  );
+  const add = assembleInstruction("ADD CX, DX");
 
   if (
     JSON.stringify(add) !==
     JSON.stringify([0x10, 0x02, 0x00, 0x03])
   ) {
-    throw new Error(
-      "ADD CX, DX encoding failed."
-    );
+    throw new Error("ADD CX, DX encoding failed.");
   }
 
-  Logger.log(
-    "PASS: ADD CX, DX"
-  );
+  Logger.log("PASS: ADD register.");
 
-  // Test 5: Unary operations.
-  const inc = assembleInstruction(
-    "INC DX"
-  );
+  const inc = assembleInstruction("INC DX");
 
   if (
     JSON.stringify(inc) !==
     JSON.stringify([0x12, 0x03])
   ) {
-    throw new Error(
-      "INC DX encoding failed."
-    );
+    throw new Error("INC DX encoding failed.");
   }
 
-  Logger.log(
-    "PASS: INC DX"
-  );
+  Logger.log("PASS: Unary instruction.");
 
-  // Test 6: Logical operations.
-  const andBytes = assembleInstruction(
-    "AND DX, CX"
-  );
+  const andBytes = assembleInstruction("AND DX, CX");
 
   if (
     JSON.stringify(andBytes) !==
     JSON.stringify([0x15, 0x03, 0x00, 0x02])
   ) {
-    throw new Error(
-      "AND DX, CX encoding failed."
-    );
+    throw new Error("AND DX, CX encoding failed.");
   }
 
-  Logger.log(
-    "PASS: AND DX, CX"
-  );
+  Logger.log("PASS: Logical instruction.");
 
-  // Test 7: LOAD and STORE.
-  const load = assembleInstruction(
-    "LOAD CX, [80h]"
-  );
-
-  const store = assembleInstruction(
-    "STORE [81h], DX"
-  );
+  // LOAD and STORE now encode a 9-bit virtual address.
+  const load80 = assembleInstruction("LOAD CX, [80h]");
+  const store81 = assembleInstruction("STORE [81h], DX");
 
   if (
-    JSON.stringify(load) !==
-    JSON.stringify([0x03, 0x02, 0x80]) ||
-    JSON.stringify(store) !==
-    JSON.stringify([0x04, 0x81, 0x03])
+    JSON.stringify(load80) !==
+    JSON.stringify([0x03, 0x02, 0x00, 0x80])
   ) {
-    throw new Error(
-      "LOAD/STORE encoding failed."
-    );
+    throw new Error("LOAD 80h encoding failed.");
   }
 
-  Logger.log(
-    "PASS: LOAD/STORE with CX and DX"
-  );
+  if (
+    JSON.stringify(store81) !==
+    JSON.stringify([0x04, 0x00, 0x81, 0x03])
+  ) {
+    throw new Error("STORE 81h encoding failed.");
+  }
 
-  // Test 8: Existing AX/BX compatibility.
-  const oldMov = assembleInstruction(
-    "MOV BX, AX"
-  );
+  Logger.log("PASS: LOAD and STORE 8-bit virtual addresses.");
+
+  const load100 = assembleInstruction("LOAD AX, [100h]");
+  const store1FF = assembleInstruction("STORE [1FFh], BX");
+
+  if (
+    JSON.stringify(load100) !==
+    JSON.stringify([0x03, 0x00, 0x01, 0x00])
+  ) {
+    throw new Error("LOAD 100h encoding failed.");
+  }
+
+  if (
+    JSON.stringify(store1FF) !==
+    JSON.stringify([0x04, 0x01, 0xFF, 0x01])
+  ) {
+    throw new Error("STORE 1FFh encoding failed.");
+  }
+
+  Logger.log("PASS: 9-bit virtual addresses 100h and 1FFh.");
+
+  const oldMov = assembleInstruction("MOV BX, AX");
 
   if (
     JSON.stringify(oldMov) !==
     JSON.stringify([0x02, 0x01, 0x00])
   ) {
-    throw new Error(
-      "Phase 1 compatibility failed."
-    );
+    throw new Error("Phase 1 compatibility failed.");
   }
 
-  Logger.log(
-    "PASS: Phase 1 AX/BX compatibility"
-  );
+  Logger.log("PASS: Phase 1 register compatibility.");
 
-  // Test 9: Invalid 8-bit value.
-  let rejectedValue = false;
+  let rejectedByte = false;
 
   try {
     assembleInstruction("MOV CX, 256");
   } catch (error) {
-    rejectedValue = true;
+    rejectedByte = true;
   }
 
-  if (!rejectedValue) {
-    throw new Error(
-      "Invalid 8-bit value was accepted."
-    );
+  if (!rejectedByte) {
+    throw new Error("Invalid 8-bit immediate was accepted.");
   }
 
-  Logger.log(
-    "PASS: Invalid 8-bit values rejected"
-  );
+  let rejectedVirtualAddress = false;
 
-  // Test 10: Complete four-register program.
+  try {
+    assembleInstruction("LOAD AX, [200h]");
+  } catch (error) {
+    rejectedVirtualAddress = true;
+  }
+
+  if (!rejectedVirtualAddress) {
+    throw new Error("Virtual address above 1FFh was accepted.");
+  }
+
+  Logger.log("PASS: Invalid values and addresses rejected.");
+
   const program = assembleProgram([
     "MOV AX, 01h",
     "MOV BX, 02h",
@@ -634,25 +612,16 @@ function testAssemblerModule() {
 
   if (program.length !== 25) {
     throw new Error(
-      "Unexpected program size: " +
-      program.length
+      "Unexpected program size: " + program.length
     );
   }
 
-  Logger.log(
-    "PASS: Four-register program assembled"
-  );
+  Logger.log("PASS: Complete four-register program assembled.");
 
-  // Test 11: Load into RAM.
-  const loadedBytes = loadProgram(
-    program,
-    0x00
-  );
+  const loadedBytes = loadProgram(program, 0x00);
 
   if (loadedBytes !== 25) {
-    throw new Error(
-      "Program load failed."
-    );
+    throw new Error("Program load failed.");
   }
 
   if (
@@ -665,11 +634,13 @@ function testAssemblerModule() {
     );
   }
 
-  Logger.log(
-    "PASS: Program loaded into RAM"
-  );
+  Logger.log("PASS: Program loaded into RAM.");
+  Logger.log("=== ALL ASSEMBLER TESTS PASSED ===");
 
-  Logger.log(
-    "=== ALL PHASE 2 ASSEMBLER TESTS PASSED ==="
-  );
+  return {
+    passed: true,
+    programBytes: program.length,
+    load80: load80,
+    store1FF: store1FF
+  };
 }
