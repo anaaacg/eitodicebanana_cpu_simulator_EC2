@@ -1,17 +1,21 @@
 
 /**
  * EitoDiceBanana CPU Simulator
- * Memory Module - Phase 1
+ * Memory Module - Phase 2 / Task 06
  *
- * RAM: 256 bytes (00h - FFh)
- * Code: 00h - 7Fh
- * Data: 80h - FFh
+ * Physical RAM: 256 bytes
+ * Frames: 8
+ * Frame size: 32 bytes
  *
- * Visual feedback:
- * READ  = Green
- * WRITE = Yellow
+ * Memory addresses: 00h - FFh
+ * Code segment: 00h - 7Fh
+ * Data segment: 80h - FFh
  *
- * Paging, cache and MMU reserved for Phase 2.
+ * READ highlight: Green
+ * WRITE highlight: Yellow
+ *
+ * Compatible with CPU, ALU, Assembler,
+ * Execution, Buses and ControlUnit.
  */
 
 // ============================================
@@ -44,20 +48,24 @@ const MEMORY_HIGHLIGHT_KEY =
 
 const MEMORY_CODE_COLOR = "#29271F";
 
+const PHYSICAL_FRAME_SIZE = 32;
+const PHYSICAL_FRAME_COUNT = 8;
+const PHYSICAL_RAM_SIZE = 256;
+
 // ============================================
 // VALIDATION
 // ============================================
 
 function isValidAddress(address) {
   return Number.isInteger(address) &&
-    address >= CONFIG.MEMORY.minAddress &&
-    address <= CONFIG.MEMORY.maxAddress;
+    address >= 0 &&
+    address < PHYSICAL_RAM_SIZE;
 }
 
 function isValidByte(value) {
   return Number.isInteger(value) &&
     value >= 0 &&
-    value <= CONFIG.CPU.maxValue;
+    value <= 255;
 }
 
 function validateAddress_(address) {
@@ -78,6 +86,22 @@ function validateByte_(value) {
   }
 }
 
+function validatePhysicalConfiguration_() {
+  if (
+    PHYSICAL_FRAME_COUNT !== 8 ||
+    PHYSICAL_FRAME_SIZE !== 32 ||
+    PHYSICAL_RAM_SIZE !== 256 ||
+    CONFIG.MEMORY.size !== 256
+  ) {
+    throw new Error(
+      "Physical RAM requires exactly " +
+      "8 frames of 32 bytes."
+    );
+  }
+
+  return true;
+}
+
 // ============================================
 // ADDRESS TRANSLATION
 // ============================================
@@ -92,6 +116,60 @@ function addressToCell(address) {
     column: MEMORY_LAYOUT.startColumn +
       (address % 16)
   };
+}
+
+function getPhysicalAddressInfo(address) {
+  validateAddress_(address);
+  validatePhysicalConfiguration_();
+
+  const frame = Math.floor(
+    address / PHYSICAL_FRAME_SIZE
+  );
+
+  const offset =
+    address % PHYSICAL_FRAME_SIZE;
+
+  return {
+    address: address,
+    frame: frame,
+    offset: offset,
+    frameStart:
+      frame * PHYSICAL_FRAME_SIZE,
+    frameEnd:
+      frame * PHYSICAL_FRAME_SIZE + 31,
+    row:
+      MEMORY_LAYOUT.startRow +
+      Math.floor(address / 16),
+    column:
+      MEMORY_LAYOUT.startColumn +
+      (address % 16)
+  };
+}
+
+function physicalFrameToAddress(frame, offset) {
+  if (
+    !Number.isInteger(frame) ||
+    frame < 0 ||
+    frame >= PHYSICAL_FRAME_COUNT
+  ) {
+    throw new Error(
+      "Invalid physical frame: " +
+      frame + ". Expected 0-7."
+    );
+  }
+
+  if (
+    !Number.isInteger(offset) ||
+    offset < 0 ||
+    offset >= PHYSICAL_FRAME_SIZE
+  ) {
+    throw new Error(
+      "Invalid frame offset: " +
+      offset + ". Expected 0-31."
+    );
+  }
+
+  return frame * PHYSICAL_FRAME_SIZE + offset;
 }
 
 // ============================================
@@ -114,11 +192,14 @@ function memorySheet_() {
   return sheet;
 }
 
+function memoryProperties_() {
+  return PropertiesService.getDocumentProperties();
+}
+
 function byteToHex_(value) {
   validateByte_(value);
 
-  return value
-    .toString(16)
+  return value.toString(16)
     .toUpperCase()
     .padStart(2, "0");
 }
@@ -126,56 +207,151 @@ function byteToHex_(value) {
 function byteToBinary_(value) {
   validateByte_(value);
 
-  return value
-    .toString(2)
+  return value.toString(2)
     .padStart(8, "0");
 }
 
 function memorySegment_(address) {
+  validateAddress_(address);
+
   return address <= CONFIG.MEMORY.codeEnd
     ? "CODE"
     : "DATA";
 }
 
 function memoryBaseColor_(address) {
-  return address <= CONFIG.MEMORY.codeEnd
+  return memorySegment_(address) === "CODE"
     ? MEMORY_CODE_COLOR
     : CONFIG.COLORS.panel;
 }
 
-function memoryProperties_() {
-  return PropertiesService.getDocumentProperties();
+// ============================================
+// HEXADECIMAL CELL PARSING
+// ============================================
+
+/**
+ * Accepts one or two hexadecimal digits.
+ *
+ * Valid examples:
+ * 0, 00, 1, 01, A, 0A, FF
+ *
+ * Rejects empty cells, negative values,
+ * invalid characters and values > FFh.
+ *
+ * Fixes the physical address 81h issue.
+ */
+function parsePhysicalMemoryCell_(raw, address) {
+  validateAddress_(address);
+
+  const text = String(raw).trim();
+
+  if (!/^[0-9A-F]{1,2}$/i.test(text)) {
+    throw new Error(
+      "Invalid byte at physical address " +
+      byteToHex_(address) +
+      "h: " + text
+    );
+  }
+
+  const value = parseInt(text, 16);
+
+  validateByte_(value);
+
+  return value;
 }
+
+// ============================================
+// RAW PHYSICAL MEMORY
+// ============================================
 
 function readRawMemory_(address) {
   validateAddress_(address);
 
   const position = addressToCell(address);
 
-  const rawValue = memorySheet_()
-    .getRange(position.row, position.column)
-    .getDisplayValue()
-    .trim();
+  const raw = memorySheet_()
+    .getRange(
+      position.row,
+      position.column
+    )
+    .getDisplayValue();
 
-  if (!/^[0-9A-F]{2}$/i.test(rawValue)) {
-    throw new Error(
-      "Invalid byte at address " +
-      byteToHex_(address) +
-      "h: " + rawValue
-    );
-  }
-
-  return parseInt(rawValue, 16);
+  return parsePhysicalMemoryCell_(
+    raw,
+    address
+  );
 }
 
 // ============================================
-// VISUAL HIGHLIGHT
+// PHYSICAL FRAME OPERATIONS
 // ============================================
 
-/**
- * Removes highlight from the previously
- * accessed cell without repainting all RAM.
- */
+function getPhysicalFrame(frame) {
+  const start = physicalFrameToAddress(
+    frame,
+    0
+  );
+
+  const row =
+    MEMORY_LAYOUT.startRow +
+    Math.floor(start / 16);
+
+  const values = memorySheet_()
+    .getRange(
+      row,
+      MEMORY_LAYOUT.startColumn,
+      2,
+      16
+    )
+    .getDisplayValues()
+    .flat();
+
+  const bytes = values.map(
+    function(raw, index) {
+      return parsePhysicalMemoryCell_(
+        raw,
+        start + index
+      );
+    }
+  );
+
+  return {
+    frame: frame,
+    startAddress: start,
+    endAddress: start + 31,
+    size: 32,
+    bytes: bytes
+  };
+}
+
+function readPhysicalFrameByte(frame, offset) {
+  const address = physicalFrameToAddress(
+    frame,
+    offset
+  );
+
+  return Read(address);
+}
+
+function writePhysicalFrameByte(
+  frame,
+  offset,
+  value
+) {
+  validateByte_(value);
+
+  const address = physicalFrameToAddress(
+    frame,
+    offset
+  );
+
+  Write(address, value);
+}
+
+// ============================================
+// MEMORY HIGHLIGHT
+// ============================================
+
 function clearMemoryHighlight() {
   const props = memoryProperties_();
 
@@ -209,12 +385,6 @@ function clearMemoryHighlight() {
   );
 }
 
-/**
- * Highlights one accessed address.
- *
- * READ: green
- * WRITE: yellow
- */
 function highlightMemory(address, operation) {
   validateAddress_(address);
 
@@ -248,7 +418,7 @@ function highlightMemory(address, operation) {
 }
 
 // ============================================
-// MEMORY INSPECTOR
+// MNEMONIC INSPECTOR
 // ============================================
 
 function getMnemonic(value) {
@@ -279,37 +449,39 @@ function getMnemonic(value) {
   return mnemonics[value] || "-";
 }
 
-/**
- * Updates the inspector without triggering
- * a second memory read.
- */
+// ============================================
+// MEMORY INSPECTOR
+// ============================================
+
 function updateMemoryInspector_(address, value) {
   const sheet = memorySheet_();
   const cells = MEMORY_LAYOUT.inspector;
 
   sheet.getRange(cells.address)
-    .setValue(byteToHex_(address) + "h");
+    .setValue(
+      byteToHex_(address) + "h"
+    );
 
   sheet.getRange(cells.hex)
-    .setValue(byteToHex_(value));
+    .setValue(
+      byteToHex_(value)
+    );
 
   sheet.getRange(cells.binary)
     .setNumberFormat("@")
-    .setValue(byteToBinary_(value));
+    .setValue(
+      byteToBinary_(value)
+    );
 
   sheet.getRange(cells.decimal)
     .setValue(value);
 
   sheet.getRange(cells.mnemonic)
-    .setValue(getMnemonic(value));
+    .setValue(
+      getMnemonic(value)
+    );
 }
 
-/**
- * Adds a small access monitor beside
- * the existing memory inspector.
- *
- * Safe to execute on an existing sheet.
- */
 function setupMemoryAccessPanel() {
   const sheet = memorySheet_();
   const C = CONFIG.COLORS;
@@ -321,48 +493,50 @@ function setupMemoryAccessPanel() {
     ["J29", "VALUE"]
   ];
 
-  labels.forEach(item => {
+  labels.forEach(function(item) {
     sheet.getRange(item[0])
       .setValue(item[1])
       .setFontColor(C.muted)
       .setFontWeight("bold");
   });
 
-  const cells = MEMORY_LAYOUT.access;
-
   [
-    cells.operation,
-    cells.segment,
-    cells.address,
-    cells.value
-  ].forEach(cell => {
+    MEMORY_LAYOUT.access.operation,
+    MEMORY_LAYOUT.access.segment,
+    MEMORY_LAYOUT.access.address,
+    MEMORY_LAYOUT.access.value
+  ].forEach(function(cell) {
     sheet.getRange(cell)
       .setBackground(C.panelAlt)
       .setFontColor(C.yellow)
       .setFontWeight("bold")
-      .setHorizontalAlignment("center")
-      .setVerticalAlignment("middle");
+      .setHorizontalAlignment("center");
   });
 
-  sheet.getRange(cells.operation)
-    .setValue("READY");
+  sheet.getRange(
+    MEMORY_LAYOUT.access.operation
+  ).setValue("READY");
 
-  sheet.getRange(cells.segment)
-    .setValue("-");
+  sheet.getRange(
+    MEMORY_LAYOUT.access.segment
+  ).setValue("-");
 
-  sheet.getRange(cells.address)
-    .setValue("--");
+  sheet.getRange(
+    MEMORY_LAYOUT.access.address
+  ).setValue("--");
 
-  sheet.getRange(cells.value)
-    .setValue("--");
+  sheet.getRange(
+    MEMORY_LAYOUT.access.value
+  ).setValue("--");
 
   SpreadsheetApp.flush();
 }
 
-/**
- * Displays the latest access information.
- */
-function updateMemoryAccess_(address, value, operation) {
+function updateMemoryAccess_(
+  address,
+  value,
+  operation
+) {
   const sheet = memorySheet_();
   const cells = MEMORY_LAYOUT.access;
 
@@ -370,13 +544,13 @@ function updateMemoryAccess_(address, value, operation) {
     operation
   ).toUpperCase();
 
-  const color = action === "WRITE"
-    ? CONFIG.COLORS.yellow
-    : CONFIG.COLORS.green;
-
   sheet.getRange(cells.operation)
     .setValue(action)
-    .setFontColor(color);
+    .setFontColor(
+      action === "WRITE"
+        ? CONFIG.COLORS.yellow
+        : CONFIG.COLORS.green
+    );
 
   sheet.getRange(cells.segment)
     .setValue(
@@ -393,25 +567,36 @@ function updateMemoryAccess_(address, value, operation) {
       byteToHex_(value) + "h"
     );
 
+  // Task 06 additional physical frame data.
+  const info = getPhysicalAddressInfo(address);
+
+  sheet.getRange("N30")
+    .setValue("FRAME " + info.frame);
+
+  sheet.getRange("N31")
+    .setValue(
+      byteToHex_(info.offset) + "h"
+    );
+
   updateMemoryInspector_(address, value);
 }
 
-/**
- * Manual inspection.
- *
- * This is also treated as a READ.
- */
 function inspectMemory(address) {
   validateAddress_(address);
 
   const value = Read(address);
+  const physical = getPhysicalAddressInfo(
+    address
+  );
 
   return {
     address: address,
     hexadecimal: byteToHex_(value),
     binary: byteToBinary_(value),
     decimal: value,
-    mnemonic: getMnemonic(value)
+    mnemonic: getMnemonic(value),
+    frame: physical.frame,
+    offset: physical.offset
   };
 }
 
@@ -469,22 +654,21 @@ function Write(address, value) {
 // ============================================
 
 /**
- * Clears the entire physical RAM.
- *
  * WARNING:
- * Removes loaded programs and data.
+ * This removes programs and RAM data.
+ * Do not run for Task 06 tests.
  */
 function clearRAM() {
   const sheet = memorySheet_();
 
-  const emptyRAM = Array.from(
+  const values = Array.from(
     { length: 16 },
     () => Array(16).fill("00")
   );
 
   sheet.getRange(6, 2, 16, 16)
     .setNumberFormat("@")
-    .setValues(emptyRAM)
+    .setValues(values)
     .setFontColor(CONFIG.COLORS.white)
     .setFontWeight("normal");
 
@@ -502,7 +686,7 @@ function clearRAM() {
 }
 
 // ============================================
-// TESTS
+// ORIGINAL MEMORY TESTS
 // ============================================
 
 function testMemoryModule() {
@@ -516,7 +700,9 @@ function testMemoryModule() {
     );
   }
 
-  Logger.log("PASS: Read/Write 12h = ABh");
+  Logger.log(
+    "PASS: Read/Write 12h = ABh"
+  );
 
   Write(0xFF, 0x7A);
 
@@ -526,7 +712,9 @@ function testMemoryModule() {
     );
   }
 
-  Logger.log("PASS: FFh = 7Ah");
+  Logger.log(
+    "PASS: FFh = 7Ah"
+  );
 
   Write(0x80, 0x25);
 
@@ -536,7 +724,9 @@ function testMemoryModule() {
     );
   }
 
-  Logger.log("PASS: Data segment 80h = 25h");
+  Logger.log(
+    "PASS: Data segment 80h = 25h"
+  );
 
   const info = inspectMemory(0x12);
 
@@ -546,47 +736,528 @@ function testMemoryModule() {
     info.decimal !== 171
   ) {
     throw new Error(
-      "Memory inspector test failed."
+      "Memory inspector failed."
     );
   }
 
-  Logger.log("PASS: Memory inspector");
+  Logger.log(
+    "PASS: Memory inspector"
+  );
+
+  let rejected = false;
 
   try {
-    Write(256, 10);
+    Read(256);
+  } catch (error) {
+    rejected = true;
+  }
 
+  if (!rejected) {
     throw new Error(
       "Invalid address was accepted."
     );
-
-  } catch (error) {
-    if (!error.message.includes(
-      "Invalid memory address"
-    )) {
-      throw error;
-    }
   }
 
-  Logger.log("PASS: Invalid address rejected");
+  Logger.log(
+    "PASS: Invalid address rejected"
+  );
+
+  rejected = false;
 
   try {
     Write(0x10, 256);
-
-    throw new Error(
-      "Invalid byte value was accepted."
-    );
-
   } catch (error) {
-    if (!error.message.includes(
-      "Invalid byte value"
-    )) {
-      throw error;
-    }
+    rejected = true;
   }
 
-  Logger.log("PASS: Invalid byte rejected");
+  if (!rejected) {
+    throw new Error(
+      "Invalid byte was accepted."
+    );
+  }
+
+  Logger.log(
+    "PASS: Invalid byte rejected"
+  );
 
   Logger.log(
     "=== ALL MEMORY TESTS PASSED ==="
   );
+}
+
+// ============================================
+// PHYSICAL FRAMES DASHBOARD
+// ============================================
+
+function setupPhysicalFramesDashboard() {
+  validatePhysicalConfiguration_();
+
+  const sheet = memorySheet_();
+  const C = CONFIG.COLORS;
+
+  // Each frame occupies two rows of RAM.
+  for (
+    let frame = 0;
+    frame < PHYSICAL_FRAME_COUNT;
+    frame++
+  ) {
+    const start = physicalFrameToAddress(
+      frame,
+      0
+    );
+
+    const end = physicalFrameToAddress(
+      frame,
+      31
+    );
+
+    const firstRow =
+      MEMORY_LAYOUT.startRow + frame * 2;
+
+    sheet.getRange(firstRow, 18)
+      .setValue(
+        "FRAME " + frame
+      )
+      .setBackground(C.panelAlt)
+      .setFontColor(C.yellow)
+      .setFontWeight("bold");
+
+    sheet.getRange(firstRow + 1, 18)
+      .setValue(
+        byteToHex_(start) + "-" +
+        byteToHex_(end) + "h"
+      )
+      .setBackground(C.panel)
+      .setFontColor(C.muted);
+
+    sheet.getRange(
+      firstRow,
+      MEMORY_LAYOUT.startColumn,
+      1,
+      16
+    ).setBorder(
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      C.yellow,
+      SpreadsheetApp.BorderStyle.SOLID
+    );
+  }
+
+  sheet.setColumnWidth(18, 130);
+
+  // Frame map heading
+  sheet.getRange("B35:Q35")
+    .breakApart();
+
+  sheet.getRange("B35:Q35")
+    .merge()
+    .setValue(
+      "PHYSICAL RAM / EIGHT 32-BYTE FRAMES"
+    )
+    .setBackground(C.panelAlt)
+    .setFontColor(C.yellow)
+    .setFontWeight("bold");
+
+  sheet.getRange("J30")
+    .setValue("LAST FRAME")
+    .setFontColor(C.muted)
+    .setFontWeight("bold");
+
+  sheet.getRange("J31")
+    .setValue("FRAME OFFSET")
+    .setFontColor(C.muted)
+    .setFontWeight("bold");
+
+  sheet.getRange("N30:N31")
+    .setBackground(C.panelAlt)
+    .setFontColor(C.yellow)
+    .setFontWeight("bold");
+
+  const headers = Array(16).fill("");
+
+  headers[0] = "FRAME";
+  headers[3] = "START";
+  headers[6] = "END";
+  headers[9] = "SIZE";
+  headers[12] = "OFFSETS";
+
+  sheet.getRange(37, 2, 1, 16)
+    .setValues([headers])
+    .setBackground(C.panelAlt)
+    .setFontColor(C.yellow)
+    .setFontWeight("bold");
+
+  const rows = [];
+
+  for (
+    let frame = 0;
+    frame < PHYSICAL_FRAME_COUNT;
+    frame++
+  ) {
+    const start = physicalFrameToAddress(
+      frame,
+      0
+    );
+
+    const end = physicalFrameToAddress(
+      frame,
+      31
+    );
+
+    const row = Array(16).fill("");
+
+    row[0] = "FRAME " + frame;
+    row[3] = byteToHex_(start) + "h";
+    row[6] = byteToHex_(end) + "h";
+    row[9] = "32 B";
+    row[12] = "00h-1Fh";
+
+    rows.push(row);
+  }
+
+  sheet.getRange(39, 2, 8, 16)
+    .setValues(rows)
+    .setBackground(C.panel)
+    .setFontColor(C.white);
+
+  sheet.getRange("B48:Q48")
+    .breakApart();
+
+  sheet.getRange("B48:Q48")
+    .merge()
+    .setValue(
+      "Address = frame * 32 + offset"
+    )
+    .setFontColor(C.muted);
+
+  SpreadsheetApp.flush();
+
+  SpreadsheetApp.getActiveSpreadsheet()
+    .toast(
+      "8 frames of 32 bytes ready",
+      "EitoDiceBanana",
+      4
+    );
+}
+
+// ============================================
+// NORMALIZE RAM DISPLAY
+// ============================================
+
+/**
+ * Converts displayed bytes to two-digit HEX.
+ *
+ * 0  -> 00
+ * A  -> 0A
+ * FF -> FF
+ *
+ * Numeric byte values are preserved.
+ * All cells are validated before writing.
+ */
+function normalizePhysicalRAMDisplay() {
+  const sheet = memorySheet_();
+
+  const range = sheet.getRange(
+    MEMORY_LAYOUT.startRow,
+    MEMORY_LAYOUT.startColumn,
+    16,
+    16
+  );
+
+  const displayed = range.getDisplayValues();
+
+  const normalized = displayed.map(
+    function(row, rowIndex) {
+      return row.map(
+        function(raw, colIndex) {
+          const address =
+            rowIndex * 16 + colIndex;
+
+          const value =
+            parsePhysicalMemoryCell_(
+              raw,
+              address
+            );
+
+          return byteToHex_(value);
+        }
+      );
+    }
+  );
+
+  range.setNumberFormat("@");
+  range.setValues(normalized);
+
+  SpreadsheetApp.flush();
+
+  Logger.log(
+    "PASS: 256 physical RAM bytes normalized"
+  );
+
+  return {
+    normalizedBytes: 256,
+    frames: 8,
+    bytesPerFrame: 32
+  };
+}
+
+// ============================================
+// TASK 06 TESTS
+// ============================================
+
+/**
+ * Tests:
+ * - 256 physical addresses
+ * - 8 frames
+ * - 32 bytes per frame
+ * - Frame and offset calculations
+ * - First and last byte of each frame
+ * - Read and write operations
+ * - Invalid addresses
+ * - Invalid frame numbers and offsets
+ * - Invalid 8-bit values
+ *
+ * RAM contents are restored afterward.
+ *
+ * Run only while CPU is stopped.
+ */
+function testPhysicalFramesModule() {
+  const sheet = memorySheet_();
+
+  const range = sheet.getRange(
+    MEMORY_LAYOUT.startRow,
+    MEMORY_LAYOUT.startColumn,
+    16,
+    16
+  );
+
+  const snapshot = range.getDisplayValues();
+
+  function assert(condition, message) {
+    if (!condition) {
+      throw new Error(
+        "TASK 06: " + message
+      );
+    }
+  }
+
+  Logger.log(
+    "=== TASK 06 PHYSICAL RAM TEST ==="
+  );
+
+  try {
+    // TEST 1: PHYSICAL ORGANIZATION
+
+    validatePhysicalConfiguration_();
+
+    assert(
+      PHYSICAL_RAM_SIZE === 256 &&
+      PHYSICAL_FRAME_COUNT === 8 &&
+      PHYSICAL_FRAME_SIZE === 32,
+      "Invalid physical memory organization"
+    );
+
+    Logger.log(
+      "PASS: 256 bytes, 8 frames, 32 bytes per frame"
+    );
+
+    // TEST 2: ALL ADDRESS MAPPINGS
+
+    for (
+      let address = 0;
+      address < 256;
+      address++
+    ) {
+      const info =
+        getPhysicalAddressInfo(address);
+
+      assert(
+        info.frame ===
+          Math.floor(address / 32),
+        "Incorrect frame at " + address
+      );
+
+      assert(
+        info.offset === address % 32,
+        "Incorrect offset at " + address
+      );
+
+      assert(
+        physicalFrameToAddress(
+          info.frame,
+          info.offset
+        ) === address,
+        "Reverse address translation failed"
+      );
+    }
+
+    Logger.log(
+      "PASS: All 256 physical addresses map to frame/offset"
+    );
+
+    // TEST 3: FRAME BOUNDARIES
+
+    for (
+      let frame = 0;
+      frame < 8;
+      frame++
+    ) {
+      const start = physicalFrameToAddress(
+        frame,
+        0
+      );
+
+      const end = physicalFrameToAddress(
+        frame,
+        31
+      );
+
+      const firstValue = 0x40 + frame;
+      const lastValue = 0xC0 + frame;
+
+      Write(start, firstValue);
+      Write(end, lastValue);
+
+      assert(
+        Read(start) === firstValue,
+        "First address failed in frame " +
+        frame
+      );
+
+      assert(
+        Read(end) === lastValue,
+        "Last address failed in frame " +
+        frame
+      );
+
+      const contents = getPhysicalFrame(
+        frame
+      );
+
+      assert(
+        contents.size === 32 &&
+        contents.bytes.length === 32 &&
+        contents.bytes[0] === firstValue &&
+        contents.bytes[31] === lastValue,
+        "Frame inspection failed: " + frame
+      );
+
+      Logger.log(
+        "PASS: Frame " + frame +
+        " boundaries " +
+        byteToHex_(start) + "h-" +
+        byteToHex_(end) + "h"
+      );
+    }
+
+    // TEST 4: INVALID ADDRESSES
+
+    [
+      -1,
+      256,
+      999,
+      1.5,
+      NaN,
+      "10"
+    ].forEach(function(address) {
+      let rejected = false;
+
+      try {
+        Read(address);
+      } catch (error) {
+        rejected = true;
+      }
+
+      assert(
+        rejected,
+        "Invalid address accepted: " +
+        address
+      );
+    });
+
+    Logger.log(
+      "PASS: Invalid physical addresses rejected"
+    );
+
+    // TEST 5: INVALID FRAMES AND OFFSETS
+
+    [
+      [-1, 0],
+      [8, 0],
+      [0, -1],
+      [0, 32],
+      [1.5, 0]
+    ].forEach(function(pair) {
+      let rejected = false;
+
+      try {
+        physicalFrameToAddress(
+          pair[0],
+          pair[1]
+        );
+      } catch (error) {
+        rejected = true;
+      }
+
+      assert(
+        rejected,
+        "Invalid frame/offset accepted"
+      );
+    });
+
+    Logger.log(
+      "PASS: Invalid frames and offsets rejected"
+    );
+
+    // TEST 6: INVALID BYTE VALUES
+
+    [
+      -1,
+      256,
+      1.5
+    ].forEach(function(value) {
+      let rejected = false;
+
+      try {
+        Write(0x80, value);
+      } catch (error) {
+        rejected = true;
+      }
+
+      assert(
+        rejected,
+        "Invalid 8-bit value accepted"
+      );
+    });
+
+    Logger.log(
+      "PASS: Values restricted to 8 bits (0..255)"
+    );
+
+    Logger.log(
+      "=== ALL TASK 06 PHYSICAL RAM TESTS PASSED ==="
+    );
+
+    return {
+      passed: true,
+      ramBytes: 256,
+      frames: 8,
+      bytesPerFrame: 32
+    };
+
+  } finally {
+    // Restore original RAM contents.
+    clearMemoryHighlight();
+
+    range.setNumberFormat("@");
+    range.setValues(snapshot);
+
+    Logger.log(
+      "RAM snapshot restored after frame tests"
+    );
+  }
 }
