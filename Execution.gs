@@ -1,1490 +1,1755 @@
 
 /**
  * EitoDiceBanana CPU Simulator
- * Multilevel Cache Hierarchy & Hit/Miss Performance Monitoring
- * Phase 2 / Tasks 09-10
+ * Execution Engine — Phase 2 / Task 10
  *
- * L1I: 8 bytes, instruction cache
- * L1D: 8 bytes, data cache
- * L2: 32 bytes, unified cache
- *
- * Line size: 8 bytes
- * Replacement: L1 single-line, L2 FIFO
- * Write policy: Write-through + Write-allocate
+ * FETCH -> DECODE -> EXECUTE -> STORE
+ * Memory operations use MMU and virtual memory.
  */
 
-const CACHE_STATE_KEY = "EDB_CACHE_STATE";
-const CACHE_LINE_SIZE = 8;
-const CACHE_L1I_LINES = 1;
-const CACHE_L1D_LINES = 1;
-const CACHE_L2_LINES = 4;
+const EXECUTION_KEY = "EDB_EXECUTION_STATE";
 
-const CACHE_LAYOUT = {
-  sheet: "CACHE",
-  title: "B2",
-  tableStartRow: 9,
-  metricsStartRow: 20,
-  eventStartRow: 32,
-  eventCount: 10
+const EXECUTION_PHASE_CELLS = {
+  FETCH: "C21",
+  DECODE: "G21",
+  EXECUTE: "K21",
+  STORE: "O21"
 };
 
-// ============================================
-// CACHE STATE
-// ============================================
+// ------------------------------------------------------------
+// EXECUTION STATE
+// ------------------------------------------------------------
 
-function emptyCacheLine_() {
+function defaultExecutionState_() {
   return {
-    valid: 0,
-    tag: null,
-    bytes: Array(CACHE_LINE_SIZE).fill(0),
-    loadedAt: 0
-  };
-}
-
-function defaultCacheState_() {
-  return {
-    version: 1,
-    sequence: 0,
-    l1i: emptyCacheLine_(),
-    l1d: emptyCacheLine_(),
-    l2: Array.from(
-      { length: CACHE_L2_LINES },
-      function() {
-        return emptyCacheLine_();
+    phase: "FETCH",
+    decoded: null,
+    result: null,
+    halted: false,
+    paused: false,
+    steps: 0,
+    instructionPC: 0,
+    lastPhase: "-",
+    microProgram: null,
+    microIndex: 0,
+    microContext: {
+      instructionBytes: []
+    },
+    lastInstructionType: "FETCH",
+    lastMicroStep: "-",
+    lastControlWord: "",
+    lastActiveSignals: [],
+    lastBuses: {
+      internal: {
+        state: "HIGH_Z",
+        source: null,
+        value: null
+      },
+      address: {
+        state: "HIGH_Z",
+        source: null,
+        value: null
+      },
+      data: {
+        state: "HIGH_Z",
+        source: null,
+        value: null
       }
-    ),
-    stats: {
-      l1iHits: 0,
-      l1iMisses: 0,
-      l1dHits: 0,
-      l1dMisses: 0,
-      l2Hits: 0,
-      l2Misses: 0,
-      ramAccesses: 0,
-      writes: 0,
-      l1Replacements: 0,
-      l2Replacements: 0,
-      invalidations: 0
     },
-    lastAccess: {
-      address: null,
-      operation: "-",
-      path: "-",
-      result: "-",
-      value: null,
-      hitStatus: "-",
-      transferFlow: "-"
-    },
-    events: []
+    lastChanges: []
   };
 }
 
-function cacheProperties_() {
-  return PropertiesService.getDocumentProperties();
-}
-
-function saveCacheState_(state) {
-  cacheProperties_().setProperty(
-    CACHE_STATE_KEY,
-    JSON.stringify(state)
-  );
-}
-
-function getCacheState_() {
-  const raw = cacheProperties_()
-    .getProperty(CACHE_STATE_KEY);
+function getExecutionState_() {
+  const raw = PropertiesService
+    .getDocumentProperties()
+    .getProperty(EXECUTION_KEY);
 
   if (!raw) {
-    const fresh = defaultCacheState_();
-    saveCacheState_(fresh);
-    return fresh;
+    return defaultExecutionState_();
   }
 
-  try {
-    const parsed = JSON.parse(raw);
+  const saved = JSON.parse(raw);
 
-    if (
-      !parsed ||
-      !parsed.l1i ||
-      !parsed.l1d ||
-      !Array.isArray(parsed.l2) ||
-      parsed.l2.length !== CACHE_L2_LINES ||
-      !parsed.stats
-    ) {
-      const fresh = defaultCacheState_();
-      saveCacheState_(fresh);
-      return fresh;
-    }
-
-    if (!parsed.lastAccess) {
-      parsed.lastAccess =
-        defaultCacheState_().lastAccess;
-    }
-
-    return parsed;
-  } catch (error) {
-    const fresh = defaultCacheState_();
-    saveCacheState_(fresh);
-    return fresh;
-  }
-}
-
-// ============================================
-// CONFIGURATION AND ADDRESSING
-// ============================================
-
-function validateCacheConfiguration_() {
-  if (
-    CACHE_LINE_SIZE !== 8 ||
-    CACHE_L1I_LINES !== 1 ||
-    CACHE_L1D_LINES !== 1 ||
-    CACHE_L2_LINES !== 4 ||
-    PHYSICAL_RAM_SIZE !== 256
-  ) {
-    throw new Error("Invalid cache configuration.");
-  }
-  return true;
-}
-
-function getCacheAddressInfo(address) {
-  validateAddress_(address);
-
-  const block = Math.floor(
-    address / CACHE_LINE_SIZE
+  const state = Object.assign(
+    defaultExecutionState_(),
+    saved
   );
-  const offset = address % CACHE_LINE_SIZE;
 
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      saved,
+      "microIndex"
+    )
+  ) {
+    state.phase = "FETCH";
+    state.decoded = null;
+    state.result = null;
+    state.microProgram = null;
+    state.microIndex = 0;
+    state.microContext = {
+      instructionBytes: []
+    };
+    state.lastInstructionType = "FETCH";
+  }
+
+  state.microContext = Object.assign(
+    { instructionBytes: [] },
+    state.microContext || {}
+  );
+
+  if (
+    !Array.isArray(
+      state.microContext.instructionBytes
+    )
+  ) {
+    state.microContext.instructionBytes = [];
+  }
+
+  if (!Array.isArray(state.microProgram)) {
+    state.microProgram = null;
+  }
+
+  if (
+    !Number.isInteger(state.microIndex) ||
+    state.microIndex < 0
+  ) {
+    state.microIndex = 0;
+  }
+
+  if (!Array.isArray(state.lastActiveSignals)) {
+    state.lastActiveSignals = [];
+  }
+
+  if (!Array.isArray(state.lastChanges)) {
+    state.lastChanges = [];
+  }
+
+  return state;
+}
+
+function saveExecutionState_(state) {
+  PropertiesService
+    .getDocumentProperties()
+    .setProperty(
+      EXECUTION_KEY,
+      JSON.stringify(state)
+    );
+}
+
+function resetExecutionState() {
+  const state = defaultExecutionState_();
+
+  saveExecutionState_(state);
+
+  clearRegisterHighlights();
+  clearMemoryHighlight();
+
+  updateExecutionVisuals_(
+    state,
+    null,
+    []
+  );
+
+  if (
+    typeof updateControlUnitPanel_ ===
+    "function"
+  ) {
+    updateControlUnitPanel_(state);
+  }
+
+  return state;
+}
+
+// ------------------------------------------------------------
+// VISUAL FEEDBACK
+// ------------------------------------------------------------
+
+function updateExecutionVisuals_(
+  state,
+  executedPhase,
+  changedFlags
+) {
+  const sheet = cpuSheet_();
+  const C = CONFIG.COLORS;
+
+  Object.keys(EXECUTION_PHASE_CELLS)
+    .forEach(function(phase) {
+      sheet.getRange(
+        EXECUTION_PHASE_CELLS[phase]
+      )
+        .setBackground(C.panelAlt)
+        .setFontColor(C.muted)
+        .setFontWeight("bold");
+    });
+
+  const visiblePhase =
+    executedPhase || state.phase;
+
+  if (
+    EXECUTION_PHASE_CELLS[visiblePhase]
+  ) {
+    sheet.getRange(
+      EXECUTION_PHASE_CELLS[visiblePhase]
+    )
+      .setBackground(C.yellow)
+      .setFontColor(C.background)
+      .setFontWeight("bold");
+  }
+
+  sheet.getRange(CPU_LAYOUT.phase)
+    .setValue(visiblePhase)
+    .setBackground(C.yellow)
+    .setFontColor(C.background);
+
+  const status = state.halted
+    ? "HALT"
+    : state.paused
+      ? "PAUSED"
+      : "READY";
+
+  const statusColor = state.halted
+    ? C.red
+    : state.paused
+      ? C.yellow
+      : C.green;
+
+  sheet.getRange(CPU_LAYOUT.status)
+    .setValue(status)
+    .setBackground(C.panelAlt)
+    .setFontColor(statusColor);
+
+  CONFIG.CPU.flags.forEach(
+    function(flag) {
+      const cell = sheet.getRange(
+        CPU_LAYOUT.flags[flag]
+      );
+
+      if (
+        changedFlags &&
+        changedFlags.includes(flag)
+      ) {
+        cell.setBackground(C.yellow)
+          .setFontColor(C.background);
+      } else {
+        cell.setBackground(C.panelAlt)
+          .setFontColor(C.yellow);
+      }
+    }
+  );
+
+  const home = SpreadsheetApp.getActive()
+    .getSheetByName("INICIO");
+
+  if (home) {
+    home.getRange("G7").setValue(status);
+    home.getRange("G12")
+      .setValue(visiblePhase);
+  }
+}
+
+function snapshotFlags_() {
   return {
-    address: address,
-    block: block,
-    tag: block,
-    offset: offset,
-    blockStart: block * CACHE_LINE_SIZE,
-    blockEnd:
-      block * CACHE_LINE_SIZE +
-      CACHE_LINE_SIZE - 1
+    ZF: getFlag("ZF"),
+    CF: getFlag("CF"),
+    SF: getFlag("SF")
   };
 }
 
-function cacheHex_(value) {
-  if (value === null || value === undefined) {
-    return "--";
-  }
-
-  return value.toString(16)
-    .toUpperCase()
-    .padStart(2, "0");
+function changedFlags_(before) {
+  return CONFIG.CPU.flags.filter(
+    function(flag) {
+      return before[flag] !== getFlag(flag);
+    }
+  );
 }
 
-function readPhysicalCacheLine_(block) {
-  const start = block * CACHE_LINE_SIZE;
-  const bytes = [];
+// ------------------------------------------------------------
+// DECODING UTILITIES
+// ------------------------------------------------------------
+
+function decodeRegister_(code) {
+  const registers = {
+    0: "AX",
+    1: "BX",
+    2: "CX",
+    3: "DX"
+  };
+
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      registers,
+      code
+    )
+  ) {
+    throw new Error(
+      "Invalid register code: " + code
+    );
+  }
+
+  return registers[code];
+}
+
+function instructionTypeFromOpcode_(opcode) {
+  const type = Object.keys(ISA).find(
+    function(name) {
+      return ISA[name].opcode === opcode;
+    }
+  );
+
+  if (!type) {
+    throw new Error(
+      "Unknown opcode: " +
+      byteToHex_(opcode) + "h"
+    );
+  }
+
+  return type;
+}
+
+/**
+ * Decodes operands from MDR/virtual memory.
+ *
+ * LOAD: opcode, reg, addressHigh, addressLow
+ * STORE: opcode, addressHigh, addressLow, reg
+ */
+
+function decodeFetchedInstruction_(
+  type,
+  bytes
+) {
+  const expectedBytes =
+    ISA[type].bytes - 1;
+
+  if (
+    !Array.isArray(bytes) ||
+    bytes.length !== expectedBytes
+  ) {
+    throw new Error(
+      "Invalid operand byte count for " +
+      type +
+      ": expected " + expectedBytes +
+      ", got " +
+      (
+        Array.isArray(bytes)
+          ? bytes.length
+          : "invalid"
+      )
+    );
+  }
+
+  function read(index) {
+    const value = bytes[index];
+
+    if (!isValidByte(value)) {
+      throw new Error(
+        "Invalid instruction byte at operand index " +
+        index
+      );
+    }
+
+    return value;
+  }
+
+  const ins = {
+    type: type,
+    opcode: getRegister("IR"),
+    register: null,
+    mode: null,
+    operand: null,
+    address: null
+  };
+
+  switch (type) {
+    case "MOV_IMM":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      if (
+        read(1) !==
+        ASM_MODES.IMMEDIATE
+      ) {
+        throw new Error(
+          "Invalid MOV immediate mode."
+        );
+      }
+
+      ins.mode = "IMMEDIATE";
+      ins.operand = read(2);
+      break;
+
+    case "MOV_REG":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      ins.mode = "REGISTER";
+      ins.operand = read(1);
+
+      decodeRegister_(ins.operand);
+      break;
+
+    case "LOAD": {
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      const addressHigh = read(1);
+      const addressLow = read(2);
+
+      ins.address =
+        (addressHigh << 8) |
+        addressLow;
+
+      if (
+        !isValidVirtualAddress(
+          ins.address
+        )
+      ) {
+        throw new Error(
+          "Invalid LOAD virtual address: " +
+          ins.address
+        );
+      }
+
+      break;
+    }
+
+    case "STORE": {
+      const addressHigh = read(0);
+      const addressLow = read(1);
+
+      ins.address =
+        (addressHigh << 8) |
+        addressLow;
+
+      ins.register = decodeRegister_(
+        read(2)
+      );
+
+      if (
+        !isValidVirtualAddress(
+          ins.address
+        )
+      ) {
+        throw new Error(
+          "Invalid STORE virtual address: " +
+          ins.address
+        );
+      }
+
+      break;
+    }
+
+    case "INC":
+    case "DEC":
+    case "NOT":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+      break;
+
+    case "ADD":
+    case "SUB":
+    case "CMP":
+    case "AND":
+    case "OR":
+    case "XOR": {
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      const mode = read(1);
+
+      if (
+        mode ===
+        ASM_MODES.IMMEDIATE
+      ) {
+        ins.mode = "IMMEDIATE";
+      } else if (
+        mode ===
+        ASM_MODES.REGISTER
+      ) {
+        ins.mode = "REGISTER";
+      } else {
+        throw new Error(
+          "Invalid addressing mode: " +
+          mode
+        );
+      }
+
+      ins.operand = read(2);
+
+      if (
+        ins.mode === "REGISTER"
+      ) {
+        decodeRegister_(
+          ins.operand
+        );
+      }
+
+      break;
+    }
+
+    case "JMP":
+    case "JZ":
+    case "JNZ":
+      ins.address = read(0);
+      break;
+
+    case "HLT":
+      break;
+
+    default:
+      throw new Error(
+        "Unsupported instruction: " +
+        type
+      );
+  }
+
+  return ins;
+}
+
+// ------------------------------------------------------------
+// DECODE MICRO-PROGRAM
+// ------------------------------------------------------------
+
+function getDecodeMicroProgram_(
+  byteCount
+) {
+  const steps = [];
 
   for (
-    let offset = 0;
-    offset < CACHE_LINE_SIZE;
-    offset++
+    let i = 0;
+    i < byteCount;
+    i++
   ) {
-    bytes.push(readRawMemory_(start + offset));
+    steps.push(
+      makeMicroStep_(
+        "DECODE_T" +
+        i +
+        "_PC_TO_MAR",
+        {
+          En_PC: 1,
+          Ld_MAR: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true,
+            virtualAddressHigh: 0
+          }
+        }
+      )
+    );
+
+    steps.push(
+      makeMicroStep_(
+        "DECODE_T" +
+        i +
+        "_VIRTUAL_MEMORY_READ",
+        {
+          En_MAR: 1,
+          Mem_R: 1,
+          Ld_MDR: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true
+          }
+        }
+      )
+    );
+
+    const captureStep = makeMicroStep_(
+      "DECODE_T" +
+      i +
+      "_CAPTURE_BYTE",
+      {
+        En_MDR: 1,
+        Inc_PC: 1
+      }
+    );
+
+    captureStep.captureInstructionByte =
+      true;
+
+    steps.push(captureStep);
   }
 
-  return bytes;
+  return steps;
 }
 
-// ============================================
-// CACHE LOOKUP AND INSERTION
-// ============================================
+// ------------------------------------------------------------
+// MICRO-PROGRAM PREPARATION
+// ------------------------------------------------------------
 
-function findL2Line_(state, tag) {
-  for (let i = 0; i < state.l2.length; i++) {
-    if (
-      state.l2[i].valid === 1 &&
-      state.l2[i].tag === tag
-    ) {
-      return i;
+function prepareCurrentMicroProgram_(state) {
+  let guard = 0;
+
+  while (
+    !state.microProgram &&
+    guard < 5
+  ) {
+    guard++;
+    state.microIndex = 0;
+
+    switch (state.phase) {
+      case "FETCH": {
+        const pc = getRegister(
+          "PC"
+        );
+
+        if (
+          pc <
+            CONFIG.MEMORY.codeStart ||
+          pc >
+            CONFIG.MEMORY.codeEnd
+        ) {
+          throw new Error(
+            "PC outside code segment: " +
+            pc
+          );
+        }
+
+        state.instructionPC = pc;
+        state.decoded = null;
+        state.result = null;
+        state.lastInstructionType =
+          "FETCH";
+
+        state.microContext = {
+          instructionBytes: []
+        };
+
+        state.microProgram =
+          getFetchMicroProgram_();
+
+        break;
+      }
+
+      case "DECODE": {
+        const type =
+          instructionTypeFromOpcode_(
+            getRegister("IR")
+          );
+
+        const operandCount =
+          ISA[type].bytes - 1;
+
+        const pc = getRegister(
+          "PC"
+        );
+
+        if (
+          operandCount > 0 &&
+          pc + operandCount - 1 >
+            CONFIG.MEMORY.codeEnd
+        ) {
+          throw new Error(
+            "Instruction operands exceed code segment 00h-7Fh."
+          );
+        }
+
+        state.lastInstructionType =
+          type;
+
+        if (
+          operandCount === 0
+        ) {
+          state.decoded =
+            decodeFetchedInstruction_(
+              type,
+              state.microContext
+                .instructionBytes
+            );
+
+          state.phase = "EXECUTE";
+          continue;
+        }
+
+        state.microProgram =
+          getDecodeMicroProgram_(
+            operandCount
+          );
+
+        break;
+      }
+
+      case "EXECUTE":
+        if (!state.decoded) {
+          throw new Error(
+            "No decoded instruction for execution."
+          );
+        }
+
+        state.lastInstructionType =
+          state.decoded.type;
+
+        state.microProgram =
+          getInstructionMicroProgram_(
+            state.decoded
+          );
+
+        break;
+
+      default:
+        throw new Error(
+          "Unknown CPU phase: " +
+          state.phase
+        );
     }
   }
 
-  return -1;
+  if (
+    !state.microProgram ||
+    state.microProgram.length === 0
+  ) {
+    throw new Error(
+      "Could not prepare a valid CPU micro-program."
+    );
+  }
 }
 
-function createLoadedCacheLine_(state, tag, bytes) {
-  state.sequence++;
+function completeMicroProgram_(
+  state,
+  completedPhase,
+  haltRequested
+) {
+  state.microProgram = null;
+  state.microIndex = 0;
 
-  return {
-    valid: 1,
-    tag: tag,
-    bytes: bytes.slice(),
-    loadedAt: state.sequence
-  };
-}
+  switch (completedPhase) {
+    case "FETCH":
+      state.phase = "DECODE";
+      break;
 
-function installL2Line_(state, tag, bytes) {
-  for (let i = 0; i < state.l2.length; i++) {
-    if (state.l2[i].valid === 0) {
-      state.l2[i] = createLoadedCacheLine_(
-        state, tag, bytes
-      );
-      return {
-        index: i,
-        replaced: false
+    case "DECODE": {
+      const type =
+        instructionTypeFromOpcode_(
+          getRegister("IR")
+        );
+
+      state.decoded =
+        decodeFetchedInstruction_(
+          type,
+          state.microContext
+            .instructionBytes
+        );
+
+      state.lastInstructionType =
+        type;
+
+      state.phase = "EXECUTE";
+      break;
+    }
+
+    case "EXECUTE":
+      if (haltRequested) {
+        state.halted = true;
+      }
+
+      state.phase = "FETCH";
+      state.decoded = null;
+
+      state.microContext = {
+        instructionBytes: []
       };
+
+      break;
+
+    default:
+      throw new Error(
+        "Cannot complete CPU phase: " +
+        completedPhase
+      );
+  }
+}
+
+// ------------------------------------------------------------
+// BUS DISPLAY
+// ------------------------------------------------------------
+
+function formatMicroBus_(bus) {
+  if (
+    !bus ||
+    bus.state !== "ACTIVE"
+  ) {
+    return "HIGH_Z";
+  }
+
+  const value =
+    bus.value === undefined ||
+    bus.value === null
+      ? ""
+      : " = " +
+        byteToHex_(bus.value) +
+        "h";
+
+  return (
+    bus.source || "BUS"
+  ) + value;
+}
+
+function highlightMicroStepRegisters_(
+  microResult
+) {
+  const signals = (
+    microResult &&
+    microResult.controlWord &&
+    microResult.controlWord.signals
+  ) || {};
+
+  const buses =
+    (
+      microResult &&
+      microResult.buses
+    ) || {};
+
+  const internal =
+    buses.internal || {};
+
+  const validNames = [
+    "PC", "IR", "MAR", "MDR",
+    "AX", "BX", "CX", "DX"
+  ];
+
+  const senders = [];
+  const receivers = [];
+
+  if (
+    validNames.indexOf(
+      internal.source
+    ) !== -1
+  ) {
+    senders.push(
+      internal.source
+    );
+  }
+
+  if (
+    signals.En_MAR === 1
+  ) {
+    senders.push("MAR");
+  }
+
+  if (
+    signals.En_MDR === 1 &&
+    (
+      signals.Mem_W === 1 ||
+      signals.IO_W === 1
+    )
+  ) {
+    senders.push("MDR");
+  }
+
+  validNames.forEach(
+    function(name) {
+      if (
+        signals["Ld_" + name] === 1
+      ) {
+        receivers.push(name);
+      }
     }
+  );
+
+  if (
+    signals.Mem_R === 1 &&
+    receivers.indexOf(
+      "MDR"
+    ) === -1
+  ) {
+    receivers.push("MDR");
   }
 
-  let victimIndex = 0;
-  let oldest = state.l2[0].loadedAt;
+  if (
+    signals.Inc_PC === 1 &&
+    receivers.indexOf(
+      "PC"
+    ) === -1
+  ) {
+    receivers.push("PC");
+  }
 
-  for (let i = 1; i < state.l2.length; i++) {
-    if (state.l2[i].loadedAt < oldest) {
-      oldest = state.l2[i].loadedAt;
-      victimIndex = i;
+  highlightRegisters(
+    Array.from(
+      new Set(
+        senders.concat(receivers)
+      )
+    )
+  );
+
+  const sheet = cpuSheet_();
+  const C = CONFIG.COLORS;
+
+  receivers.forEach(
+    function(name) {
+      if (
+        senders.indexOf(
+          name
+        ) === -1
+      ) {
+        sheet.getRange(
+          CPU_LAYOUT.registers[name]
+        )
+          .setBackground(C.green)
+          .setFontColor(
+            C.background
+          );
+      }
     }
-  }
-
-  state.stats.l2Replacements++;
-
-  state.l2[victimIndex] = createLoadedCacheLine_(
-    state, tag, bytes
   );
-
-  return {
-    index: victimIndex,
-    replaced: true
-  };
 }
 
-function installL1Line_(state, type, tag, bytes) {
-  const key =
-    type === "INSTRUCTION" ? "l1i" : "l1d";
+// ------------------------------------------------------------
+// EXECUTION TRACE
+// ------------------------------------------------------------
 
-  if (
-    state[key].valid === 1 &&
-    state[key].tag !== tag
-  ) {
-    state.stats.l1Replacements++;
-  }
-
-  state[key] = createLoadedCacheLine_(
-    state, tag, bytes
-  );
-
-  return state[key];
-}
-
-function addCacheEvent_(state, event, detail) {
-  state.events.push({
-    time: new Date().toISOString(),
-    event: event,
-    detail: detail
-  });
-
-  if (state.events.length > 50) {
-    state.events = state.events.slice(-50);
-  }
-}
-
-// ============================================
-// HIT RATE CALCULATIONS
-// ============================================
-
-function calculateCacheHitRate_(hits, misses) {
-  const h = Number(hits) || 0;
-  const m = Number(misses) || 0;
-  const total = h + m;
-
-  if (total === 0) {
-    return {
-      hits: 0,
-      misses: 0,
-      total: 0,
-      rate: 0,
-      formatted: "0.0%"
-    };
-  }
-
-  const rate = (h / total) * 100;
-
-  return {
-    hits: h,
-    misses: m,
-    total: total,
-    rate: rate,
-    formatted: rate.toFixed(1) + "%"
-  };
-}
-
-function getCachePerformanceMetrics() {
-  const stats = getCacheState_().stats;
-
-  const l1i = calculateCacheHitRate_(
-    stats.l1iHits,
-    stats.l1iMisses
-  );
-
-  const l1d = calculateCacheHitRate_(
-    stats.l1dHits,
-    stats.l1dMisses
-  );
-
-  const l2 = calculateCacheHitRate_(
-    stats.l2Hits,
-    stats.l2Misses
-  );
-
-  const totalHits =
-    stats.l1iHits +
-    stats.l1dHits +
-    stats.l2Hits;
-
-  const totalMisses =
-    stats.l1iMisses +
-    stats.l1dMisses +
-    stats.l2Misses;
-
-  const overall = calculateCacheHitRate_(
-    totalHits,
-    totalMisses
-  );
-
-  return {
-    l1i: l1i,
-    l1d: l1d,
-    l2: l2,
-    overall: overall,
-    rawStats: stats
-  };
-}
-
-// ============================================
-// CACHE HIT/MISS ACCESS
-// ============================================
-
-function accessPhysicalCache_(address, type) {
-  validateAddress_(address);
-  validateCacheConfiguration_();
-
-  if (
-    type !== "INSTRUCTION" &&
-    type !== "DATA"
-  ) {
-    throw new Error(
-      "Invalid cache access type: " + type
-    );
-  }
-
-  const state = getCacheState_();
-  const info = getCacheAddressInfo(address);
-
-  const l1Key =
-    type === "INSTRUCTION" ? "l1i" : "l1d";
-
-  const hitKey =
-    type === "INSTRUCTION"
-      ? "l1iHits"
-      : "l1dHits";
-
-  const missKey =
-    type === "INSTRUCTION"
-      ? "l1iMisses"
-      : "l1dMisses";
-
-  const l1 = state[l1Key];
-
-  let value;
-  let path;
-  let result;
-  let hitStatus;
-  let transferFlow;
-
-  // L1 HIT
-  if (
-    l1.valid === 1 &&
-    l1.tag === info.tag
-  ) {
-    state.stats[hitKey]++;
-    value = l1.bytes[info.offset];
-    path = l1Key.toUpperCase();
-    result = "L1 HIT";
-    hitStatus = "HIT";
-
-    transferFlow =
-      type === "INSTRUCTION"
-        ? "L1I → CPU"
-        : "L1D → CPU";
-
-    addCacheEvent_(
-      state,
-      result,
-      path + " block " + info.block
-    );
-
-  } else {
-    // L1 MISS
-    state.stats[missKey]++;
-
-    const l2Index = findL2Line_(
-      state,
-      info.tag
-    );
-
-    let bytes;
-
-    if (l2Index !== -1) {
-      // L2 HIT
-      state.stats.l2Hits++;
-      bytes = state.l2[l2Index].bytes.slice();
-      path = "L2";
-      result = "L1 MISS / L2 HIT";
-      hitStatus = "L2 HIT";
-
-      transferFlow =
-        type === "INSTRUCTION"
-          ? "L2 → L1I → CPU"
-          : "L2 → L1D → CPU";
-
-      addCacheEvent_(
-        state,
-        result,
-        "L2 block " + info.block +
-        " → " + l1Key.toUpperCase()
+function appendExecutionTrace_(
+  state,
+  phase,
+  detail,
+  instructionName
+) {
+  const sheet =
+    SpreadsheetApp
+      .getActive()
+      .getSheetByName(
+        "TRAZA"
       );
-
-    } else {
-      // L2 MISS
-      state.stats.l2Misses++;
-      state.stats.ramAccesses++;
-
-      bytes = readPhysicalCacheLine_(
-        info.block
-      );
-
-      installL2Line_(
-        state,
-        info.tag,
-        bytes
-      );
-
-      path = "RAM";
-      result = "L1 MISS / L2 MISS";
-      hitStatus = "MISS";
-
-      transferFlow =
-        type === "INSTRUCTION"
-          ? "RAM → L2 → L1I → CPU"
-          : "RAM → L2 → L1D → CPU";
-
-      addCacheEvent_(
-        state,
-        "LINE LOADED",
-        "RAM → L2, block " + info.block
-      );
-
-      addCacheEvent_(
-        state,
-        result,
-        "RAM → L2 → " + l1Key.toUpperCase()
-      );
-    }
-
-    installL1Line_(
-      state,
-      type,
-      info.tag,
-      bytes
-    );
-
-    value = bytes[info.offset];
-  }
-
-  state.lastAccess = {
-    address: address,
-    operation:
-      type === "INSTRUCTION" ? "FETCH" : "READ",
-    path: path,
-    result: result,
-    value: value,
-    hitStatus: hitStatus,
-    transferFlow: transferFlow
-  };
-
-  saveCacheState_(state);
-  syncCacheDashboard_(state);
-
-  return value;
-}
-
-function cacheReadInstruction(address) {
-  return accessPhysicalCache_(
-    address,
-    "INSTRUCTION"
-  );
-}
-
-function cacheReadData(address) {
-  return accessPhysicalCache_(
-    address,
-    "DATA"
-  );
-}
-
-// ============================================
-// DATA CACHE WRITE
-// ============================================
-
-function cacheWriteData(address, value) {
-  validateAddress_(address);
-  validateByte_(value);
-
-  // Write-allocate
-  accessPhysicalCache_(address, "DATA");
-
-  const state = getCacheState_();
-  const info = getCacheAddressInfo(address);
-
-  // Write-through
-  Write(address, value);
-
-  if (
-    state.l1d.valid === 1 &&
-    state.l1d.tag === info.tag
-  ) {
-    state.l1d.bytes[info.offset] = value;
-  }
-
-  const index = findL2Line_(
-    state,
-    info.tag
-  );
-
-  if (index !== -1) {
-    state.l2[index].bytes[info.offset] = value;
-  }
-
-  // Invalidate instruction line if modified
-  if (
-    state.l1i.valid === 1 &&
-    state.l1i.tag === info.tag
-  ) {
-    state.l1i = emptyCacheLine_();
-    state.stats.invalidations++;
-
-    addCacheEvent_(
-      state,
-      "L1I INVALIDATED",
-      "Physical block " + info.block
-    );
-  }
-
-  state.stats.writes++;
-
-  state.lastAccess = {
-    address: address,
-    operation: "WRITE",
-    path: "L1D → L2 → RAM",
-    result: "WRITE-THROUGH",
-    value: value,
-    hitStatus: "WRITE-THROUGH",
-    transferFlow: "CPU → L1D → L2 → RAM"
-  };
-
-  addCacheEvent_(
-    state,
-    "WRITE-THROUGH",
-    cacheHex_(address) + "h = " +
-    cacheHex_(value) + "h"
-  );
-
-  saveCacheState_(state);
-  syncCacheDashboard_(state);
-
-  return value;
-}
-
-// ============================================
-// PHYSICAL FRAME INVALIDATION
-// ============================================
-
-function invalidateCachePhysicalFrame(frame) {
-  if (
-    !Number.isInteger(frame) ||
-    frame < 0 ||
-    frame >= 8
-  ) {
-    throw new Error(
-      "Invalid frame for cache invalidation: " +
-      frame
-    );
-  }
-
-  const state = getCacheState_();
-
-  const firstBlock = frame * 4;
-  const lastBlock = firstBlock + 3;
-
-  function belongsToFrame(line) {
-    return (
-      line.valid === 1 &&
-      line.tag >= firstBlock &&
-      line.tag <= lastBlock
-    );
-  }
-
-  let count = 0;
-
-  if (belongsToFrame(state.l1i)) {
-    state.l1i = emptyCacheLine_();
-    count++;
-  }
-
-  if (belongsToFrame(state.l1d)) {
-    state.l1d = emptyCacheLine_();
-    count++;
-  }
-
-  state.l2 = state.l2.map(function(line) {
-    if (belongsToFrame(line)) {
-      count++;
-      return emptyCacheLine_();
-    }
-
-    return line;
-  });
-
-  state.stats.invalidations += count;
-
-  addCacheEvent_(
-    state,
-    "FRAME INVALIDATION",
-    "Frame " + frame +
-    " / " + count + " lines"
-  );
-
-  saveCacheState_(state);
-  syncCacheDashboard_(state);
-
-  return count;
-}
-
-function getCacheStatistics() {
-  return getCacheState_().stats;
-}
-
-function getCacheContents() {
-  const state = getCacheState_();
-
-  return {
-    l1i: state.l1i,
-    l1d: state.l1d,
-    l2: state.l2
-  };
-}
-
-// ============================================
-// CACHE DASHBOARD
-// ============================================
-
-function cacheSheet_() {
-  const sheet = SpreadsheetApp
-    .getActiveSpreadsheet()
-    .getSheetByName(CACHE_LAYOUT.sheet);
 
   if (!sheet) {
     throw new Error(
-      'CACHE sheet was not found.'
+      "TRAZA sheet not found."
     );
   }
 
-  return sheet;
-}
-
-function renderCacheDashboard() {
-  const sheet = cacheSheet_();
-  const C = CONFIG.COLORS;
-
-  sheet.getRange("B2:N45")
-    .setBackground(C.background)
-    .setFontColor(C.white);
-
-  sheet.getRange("B2")
-    .setValue(
-      "EitoDiceBanana — MULTILEVEL CACHE (L1I / L1D / L2) & MONITORING"
-    )
-    .setFontColor(C.yellow)
-    .setFontWeight("bold")
-    .setFontSize(14);
-
-  sheet.getRange("B4")
-    .setValue("L1I: 8 B / 1 LINE (INSTRUCTION)")
-    .setFontColor(C.green)
-    .setFontWeight("bold");
-
-  sheet.getRange("F4")
-    .setValue("L1D: 8 B / 1 LINE (DATA)")
-    .setFontColor(C.yellow)
-    .setFontWeight("bold");
-
-  sheet.getRange("J4")
-    .setValue("L2: 32 B / 4 LINES (UNIFIED / FIFO)")
-    .setFontColor(C.green)
-    .setFontWeight("bold");
-
-  sheet.getRange("B6")
-    .setValue(
-      "POLICIES: FIFO REPLACEMENT | WRITE-THROUGH | WRITE-ALLOCATE"
-    )
-    .setFontColor(C.muted);
-
-  const headers = [[
-    "CACHE",
-    "TAG",
-    "VALID",
-    "TYPE",
-    "B0",
-    "B1",
-    "B2",
-    "B3",
-    "B4",
-    "B5",
-    "B6",
-    "B7"
-  ]];
-
-  sheet.getRange("B8:M8")
-    .setValues(headers)
-    .setBackground(C.panelAlt)
-    .setFontColor(C.yellow)
-    .setFontWeight("bold")
-    .setHorizontalAlignment("center");
-
-  sheet.getRange("B18")
-    .setValue("LAST MEMORY ACCESS & FLOW")
-    .setFontColor(C.yellow)
-    .setFontWeight("bold");
-
-  const accessLabels = [
-    ["B19", "ADDRESS"],
-    ["B20", "OPERATION"],
-    ["B21", "PATH"],
-    ["B22", "RESULT"],
-    ["B23", "VALUE"],
-    ["B24", "TRANSFER FLOW"],
-    ["B25", "HIT / MISS STATUS"]
-  ];
-
-  accessLabels.forEach(function(item) {
-    sheet.getRange(item[0])
-      .setValue(item[1])
-      .setFontColor(C.muted)
-      .setFontWeight("bold");
-  });
-
-  sheet.getRange("G18")
-    .setValue(
-      "CACHE PERFORMANCE & HIT RATES (TASK 10)"
-    )
-    .setFontColor(C.yellow)
-    .setFontWeight("bold");
-
-  const perfHeaders = [[
-    "LEVEL",
-    "HITS",
-    "MISSES",
-    "TOTAL ACCESSES",
-    "HIT RATE"
-  ]];
-
-  sheet.getRange("G19:K19")
-    .setValues(perfHeaders)
-    .setBackground(C.panelAlt)
-    .setFontColor(C.yellow)
-    .setFontWeight("bold")
-    .setHorizontalAlignment("center");
-
-  const levelLabels = [
-    ["G20", "L1I (Instructions)"],
-    ["G21", "L1D (Data)"],
-    ["G22", "L2 (Unified)"],
-    ["G23", "OVERALL (System)"]
-  ];
-
-  levelLabels.forEach(function(item) {
-    sheet.getRange(item[0])
-      .setValue(item[1])
-      .setFontColor(C.white)
-      .setFontWeight("bold");
-  });
-
-  const auxStats = [
-    ["G25", "RAM LINE LOADS"],
-    ["G26", "WRITES (Write-Through)"],
-    ["G27", "L2 REPLACEMENTS (FIFO)"],
-    ["G28", "FRAME INVALIDATIONS"]
-  ];
-
-  auxStats.forEach(function(item) {
-    sheet.getRange(item[0])
-      .setValue(item[1])
-      .setFontColor(C.muted);
-  });
-
-  sheet.getRange("B30")
-    .setValue("RECENT CACHE EVENTS & ANIMATIONS")
-    .setFontColor(C.yellow)
-    .setFontWeight("bold");
-
-  sheet.getRange("B31:D31")
-    .setValues([["TIME", "EVENT", "DETAIL"]])
-    .setBackground(C.panelAlt)
-    .setFontColor(C.yellow)
-    .setFontWeight("bold");
-
-  sheet.setColumnWidth(2, 110);
-  sheet.setColumnWidth(3, 170);
-  sheet.setColumnWidth(4, 180);
-  sheet.setColumnWidth(5, 110);
-
-  for (let col = 6; col <= 13; col++) {
-    sheet.setColumnWidth(col, 105);
-  }
-
-  sheet.setColumnWidth(14, 210);
-
-  syncCacheDashboard_(getCacheState_());
-  SpreadsheetApp.flush();
-}
-
-function syncCacheDashboard_(cacheState) {
-  const sheet = cacheSheet_();
-  const C = CONFIG.COLORS;
-  const state = cacheState || getCacheState_();
-
-  const lines = [
-    ["L1I", state.l1i, "INSTRUCTION"],
-    ["L1D", state.l1d, "DATA"],
-    ["L2-0", state.l2[0], "UNIFIED"],
-    ["L2-1", state.l2[1], "UNIFIED"],
-    ["L2-2", state.l2[2], "UNIFIED"],
-    ["L2-3", state.l2[3], "UNIFIED"]
-  ];
-
-  const matrix = lines.map(function(item) {
-    const line = item[1];
-
-    return [
-      item[0],
-      line.valid === 1
-        ? line.tag.toString(16).toUpperCase()
-        : "--",
-      line.valid,
-      item[2]
-    ].concat(
-      line.valid === 1
-        ? line.bytes.map(cacheHex_)
-        : Array(8).fill("--")
-    );
-  });
-
-  sheet.getRange(9, 2, 6, 12)
-    .setNumberFormat("@")
-    .setValues(matrix)
-    .setBackground(C.panel)
-    .setFontColor(C.white)
-    .setHorizontalAlignment("center");
-
-  lines.forEach(function(item, index) {
-    sheet.getRange(9 + index, 4)
-      .setFontColor(
-        item[1].valid === 1 ? C.green : C.red
-      )
-      .setFontWeight("bold");
-  });
-
-  // A result may contain both MISS and HIT.
-  // Color according to the final status.
-  const last = state.lastAccess || {};
-  const status = String(last.hitStatus || "");
-  const isHit =
-    status === "HIT" || status === "L2 HIT";
-  const isMiss = status === "MISS";
-
-  const accessValues = [
-    [
-      last.address === null ||
-      last.address === undefined
-        ? "--"
-        : cacheHex_(last.address) + "h"
-    ],
-    [last.operation || "-"],
-    [last.path || "-"],
-    [last.result || "-"],
-    [
-      last.value === null ||
-      last.value === undefined
-        ? "--"
-        : cacheHex_(last.value) + "h"
-    ],
-    [last.transferFlow || "-"],
-    [last.hitStatus || "-"]
-  ];
-
-  sheet.getRange("D19:D25")
-    .setValues(accessValues)
-    .setBackground(C.panelAlt)
-    .setFontColor(C.white)
-    .setFontWeight("bold");
-
-  sheet.getRange("D22")
-    .setFontColor(
-      isHit ? C.green :
-      isMiss ? C.red : C.yellow
-    );
-
-  sheet.getRange("D25")
-    .setFontColor(
-      isHit ? C.green :
-      isMiss ? C.red : C.yellow
-    );
-
-  const metrics = getCachePerformanceMetrics();
-
-  const perfMatrix = [
-    [
-      metrics.l1i.hits,
-      metrics.l1i.misses,
-      metrics.l1i.total,
-      metrics.l1i.formatted
-    ],
-    [
-      metrics.l1d.hits,
-      metrics.l1d.misses,
-      metrics.l1d.total,
-      metrics.l1d.formatted
-    ],
-    [
-      metrics.l2.hits,
-      metrics.l2.misses,
-      metrics.l2.total,
-      metrics.l2.formatted
-    ],
-    [
-      metrics.overall.hits,
-      metrics.overall.misses,
-      metrics.overall.total,
-      metrics.overall.formatted
-    ]
-  ];
-
-  sheet.getRange("H20:K23")
-    .setValues(perfMatrix)
-    .setBackground(C.panelAlt)
-    .setFontColor(C.white)
-    .setFontWeight("bold")
-    .setHorizontalAlignment("center");
-
-  sheet.getRange("H20:H23")
-    .setFontColor(C.green);
-
-  sheet.getRange("I20:I23")
-    .setFontColor(C.red);
-
-  [
-    metrics.l1i,
-    metrics.l1d,
-    metrics.l2,
-    metrics.overall
-  ].forEach(function(m, index) {
-    sheet.getRange(20 + index, 11)
-      .setFontColor(
-        m.rate >= 50
-          ? C.green
-          : m.total === 0
-            ? C.muted
-            : C.yellow
-      )
-      .setFontWeight("bold");
-  });
-
-  const stats = state.stats;
-
-  const auxValues = [
-    [stats.ramAccesses],
-    [stats.writes],
-    [stats.l2Replacements],
-    [stats.invalidations]
-  ];
-
-  sheet.getRange("I25:I28")
-    .setValues(auxValues)
-    .setBackground(C.panelAlt)
-    .setFontColor(C.yellow)
-    .setFontWeight("bold")
-    .setHorizontalAlignment("center");
-
-  const eventRows = Array.from(
-    { length: CACHE_LAYOUT.eventCount },
-    function() {
-      return ["", "", ""];
-    }
+  const row = Math.max(
+    6,
+    sheet.getLastRow() + 1
   );
 
-  state.events.slice(-CACHE_LAYOUT.eventCount)
-    .forEach(function(event, index, events) {
-      const row =
-        CACHE_LAYOUT.eventCount -
-        events.length +
-        index;
-
-      eventRows[row] = [
-        event.time.substring(11, 19),
-        event.event,
-        event.detail
-      ];
-    });
-
   sheet.getRange(
-    CACHE_LAYOUT.eventStartRow,
+    row,
     2,
-    CACHE_LAYOUT.eventCount,
-    3
+    1,
+    6
   )
-    .setValues(eventRows)
-    .setBackground(C.panel)
-    .setFontColor(C.white);
-
-  for (let i = 0; i < eventRows.length; i++) {
-    const eventName = eventRows[i][1];
-
-    const color =
-      eventName.indexOf("HIT") !== -1
-        ? C.green
-        : eventName.indexOf("MISS") !== -1
-          ? C.red
-          : eventName.indexOf("INVALIDAT") !== -1
-            ? C.yellow
-            : C.white;
-
-    sheet.getRange(
-      CACHE_LAYOUT.eventStartRow + i,
-      3
-    ).setFontColor(color);
-  }
+    .setValues([[
+      state.steps,
+      phase,
+      byteToHex_(
+        state.instructionPC
+      ) + "h",
+      byteToHex_(
+        getRegister("IR")
+      ) + "h",
+      instructionName ||
+        state.lastInstructionType ||
+        "FETCH",
+      detail
+    ]])
+    .setBackground(
+      CONFIG.COLORS.panel
+    )
+    .setFontColor(
+      CONFIG.COLORS.white
+    );
 }
 
-// ============================================
-// RESET
-// ============================================
+// ------------------------------------------------------------
+// CPU STEP
+// ------------------------------------------------------------
 
-function resetCacheModule() {
-  const state = defaultCacheState_();
-  saveCacheState_(state);
+function stepCpu() {
+  const state =
+    getExecutionState_();
 
-  try {
-    syncCacheDashboard_(state);
-  } catch (error) {
-    // Dashboard may be unavailable.
+  if (
+    state.halted ||
+    state.paused
+  ) {
+    return state;
   }
 
-  Logger.log(
-    "PASS: Cache hierarchy and performance counters reset to 0"
+  if (
+    !state.microProgram ||
+    state.microIndex >=
+      state.microProgram.length
+  ) {
+    state.microProgram = null;
+    state.microIndex = 0;
+
+    prepareCurrentMicroProgram_(
+      state
+    );
+  }
+
+  const phaseBefore =
+    state.phase;
+
+  const flagsBefore =
+    snapshotFlags_();
+
+  const microStep =
+    state.microProgram[
+      state.microIndex
+    ];
+
+  if (!microStep) {
+    throw new Error(
+      "Micro-step not found at index " +
+      state.microIndex
+    );
+  }
+
+  const instructionName =
+    state.decoded
+      ? state.decoded.type
+      : state.lastInstructionType;
+
+  let microResult;
+
+  if (
+    shouldExecuteMicroStep_(
+      microStep
+    )
+  ) {
+    microResult =
+      executeMicroOperation_(
+        microStep,
+        state.microContext
+      );
+
+  } else {
+    const idleWord =
+      createControlWord_({});
+
+    microResult = {
+      controlWord: idleWord,
+      binary: idleWord.binary,
+      activeSignals: [],
+      buses:
+        resolveControlBuses_(
+          idleWord,
+          state.microContext
+        ),
+      changes: [
+        "SKIPPED: " +
+        microStep.condition
+      ],
+      context:
+        state.microContext,
+      halt: false,
+      description:
+        microStep.name
+    };
+  }
+
+  if (
+    microStep.captureInstructionByte
+  ) {
+    state.microContext
+      .instructionBytes
+      .push(
+        getRegister("MDR")
+      );
+  }
+
+  if (
+    microResult.context &&
+    microResult.context.aluResult !==
+      undefined
+  ) {
+    state.result =
+      microResult.context.aluResult;
+  }
+
+  state.lastMicroStep =
+    microResult.description;
+
+  state.lastControlWord =
+    microResult.binary;
+
+  state.lastActiveSignals =
+    microResult.activeSignals;
+
+  state.lastBuses =
+    microResult.buses;
+
+  state.lastChanges =
+    microResult.changes;
+
+  state.microIndex++;
+  state.steps++;
+
+  const completed =
+    state.microIndex >=
+    state.microProgram.length;
+
+  const displayedPhase =
+    phaseBefore === "EXECUTE" &&
+    completed
+      ? "STORE"
+      : phaseBefore;
+
+  if (completed) {
+    completeMicroProgram_(
+      state,
+      phaseBefore,
+      microResult.halt
+    );
+  }
+
+  state.lastPhase =
+    displayedPhase;
+
+  const changesText =
+    microResult.changes.length > 0
+      ? microResult.changes.join(
+          " / "
+        )
+      : "No register changes";
+
+  const detail =
+    microResult.description +
+    " | CW=" +
+    microResult.binary +
+    " | " +
+    changesText +
+    " | INT=" +
+    formatMicroBus_(
+      microResult.buses.internal
+    ) +
+    " | ADDR=" +
+    formatMicroBus_(
+      microResult.buses.address
+    ) +
+    " | DATA=" +
+    formatMicroBus_(
+      microResult.buses.data
+    );
+
+  saveExecutionState_(state);
+
+  appendExecutionTrace_(
+    state,
+    displayedPhase,
+    detail,
+    instructionName
+  );
+
+  updateExecutionVisuals_(
+    state,
+    displayedPhase,
+    microResult.controlWord
+      .signals.Ld_FLAGS === 1
+      ? CONFIG.CPU.flags.slice()
+      : changedFlags_(
+          flagsBefore
+        )
+  );
+
+  highlightMicroStepRegisters_(
+    microResult
+  );
+
+  if (
+    typeof updateControlUnitPanel_ ===
+    "function"
+  ) {
+    updateControlUnitPanel_(
+      state
+    );
+  }
+
+  return state;
+}
+
+// ------------------------------------------------------------
+// RUN
+// ------------------------------------------------------------
+
+function runCpu() {
+  if (
+    typeof edbRunContinuous_ ===
+    "function"
+  ) {
+    return edbRunContinuous_();
+  }
+
+  let state =
+    getExecutionState_();
+
+  if (state.halted) {
+    return state;
+  }
+
+  state.paused = false;
+  saveExecutionState_(state);
+
+  const speed = String(
+    cpuSheet_()
+      .getRange("G29")
+      .getValue()
+  ).trim().toLowerCase();
+
+  const delays = {
+    lento: 1000,
+    normal: 500,
+    rapido: 100,
+    "rápido": 100
+  };
+
+  const delay =
+    delays[speed] === undefined
+      ? 500
+      : delays[speed];
+
+  const maxMicroSteps = 20;
+
+  for (
+    let i = 0;
+    i < maxMicroSteps;
+    i++
+  ) {
+    state = getExecutionState_();
+
+    if (
+      state.halted ||
+      state.paused
+    ) {
+      break;
+    }
+
+    state = stepCpu();
+    SpreadsheetApp.flush();
+
+    if (
+      state.halted ||
+      state.paused
+    ) {
+      break;
+    }
+
+    Utilities.sleep(delay);
+  }
+
+  return getExecutionState_();
+}
+
+// ------------------------------------------------------------
+// PAUSE / RESUME
+// ------------------------------------------------------------
+
+function pauseCpu() {
+  const state =
+    getExecutionState_();
+
+  state.paused = true;
+  saveExecutionState_(state);
+
+  updateExecutionVisuals_(
+    state,
+    state.lastPhase === "-"
+      ? state.phase
+      : state.lastPhase,
+    []
   );
 
   return state;
 }
 
-// ============================================
-// BENCHMARK
-// ============================================
+function resumeCpu() {
+  const state =
+    getExecutionState_();
 
-function runCacheBenchmarkProgram() {
-  const benchmarkAddress = 0x43;
-  const originalByte =
-    readRawMemory_(benchmarkAddress);
+  if (state.halted) {
+    return state;
+  }
 
-  resetCacheModule();
+  state.paused = false;
+  saveExecutionState_(state);
 
-  Logger.log(
-    "=== RUNNING TASK 10 CACHE BENCHMARK PROGRAM ==="
+  updateExecutionVisuals_(
+    state,
+    state.lastPhase === "-"
+      ? state.phase
+      : state.lastPhase,
+    []
   );
 
-  try {
-    cacheReadInstruction(0x00);
-    cacheReadInstruction(0x01);
-    cacheReadInstruction(0x02);
-    cacheReadInstruction(0x03);
-
-    cacheReadData(0x40);
-    cacheReadData(0x41);
-    cacheReadData(0x42);
-
-    cacheWriteData(benchmarkAddress, 0xAA);
-
-    cacheReadInstruction(0x20);
-    cacheReadInstruction(0x00);
-
-    const metrics =
-      getCachePerformanceMetrics();
-
-    Logger.log(
-      "L1I: Hits=" + metrics.l1i.hits +
-      ", Misses=" + metrics.l1i.misses +
-      ", HitRate=" + metrics.l1i.formatted
-    );
-
-    Logger.log(
-      "L1D: Hits=" + metrics.l1d.hits +
-      ", Misses=" + metrics.l1d.misses +
-      ", HitRate=" + metrics.l1d.formatted
-    );
-
-    Logger.log(
-      "L2: Hits=" + metrics.l2.hits +
-      ", Misses=" + metrics.l2.misses +
-      ", HitRate=" + metrics.l2.formatted
-    );
-
-    Logger.log(
-      "OVERALL: Hits=" + metrics.overall.hits +
-      ", Misses=" + metrics.overall.misses +
-      ", HitRate=" + metrics.overall.formatted
-    );
-
-    Logger.log(
-      "=== CACHE BENCHMARK PROGRAM COMPLETE ==="
-    );
-
-    return metrics;
-
-  } finally {
-    // Restore RAM without affecting performance counters.
-    Write(benchmarkAddress, originalByte);
-
-    // Repair any cached copy of that byte.
-    const state = getCacheState_();
-    const info = getCacheAddressInfo(
-      benchmarkAddress
-    );
-
-    [state.l1i, state.l1d]
-      .concat(state.l2)
-      .forEach(function(line) {
-        if (
-          line.valid === 1 &&
-          line.tag === info.tag
-        ) {
-          line.bytes[info.offset] = originalByte;
-        }
-      });
-
-    saveCacheState_(state);
-    syncCacheDashboard_(state);
-  }
+  return state;
 }
 
-// ============================================
-// TASK 10 TESTS
-// ============================================
+// ------------------------------------------------------------
+// RESET
+// ------------------------------------------------------------
 
-function assertCache_(condition, message) {
-  if (!condition) {
-    throw new Error(
-      "TASK 10 CACHE TEST FAILED: " + message
-    );
+function resetCpu() {
+  // Restore original physical pages and mapping
+  // before resetting PC to 0.
+  if (
+    typeof resetPagingForCpu_ ===
+    "function"
+  ) {
+    resetPagingForCpu_();
+  } else if (
+    typeof resetCacheModule ===
+    "function"
+  ) {
+    resetCacheModule();
   }
-}
 
-function testCacheHitMissMonitoring() {
-  Logger.log(
-    "=== STARTING TASK 10 CACHE HIT/MISS MONITORING TESTS ==="
-  );
-
-  const props = cacheProperties_();
-  const oldCache =
-    props.getProperty(CACHE_STATE_KEY);
-
-  try {
-    // TEST 1: Zero-access hit rates
-    resetCacheModule();
-    const zeroMetrics =
-      getCachePerformanceMetrics();
-
-    assertCache_(
-      zeroMetrics.l1i.rate === 0 &&
-      zeroMetrics.l1i.formatted === "0.0%",
-      "L1I zero rate"
-    );
-
-    assertCache_(
-      zeroMetrics.l1d.rate === 0 &&
-      zeroMetrics.l1d.formatted === "0.0%",
-      "L1D zero rate"
-    );
-
-    assertCache_(
-      zeroMetrics.l2.rate === 0 &&
-      zeroMetrics.l2.formatted === "0.0%",
-      "L2 zero rate"
-    );
-
-    assertCache_(
-      zeroMetrics.overall.rate === 0 &&
-      zeroMetrics.overall.formatted === "0.0%",
-      "Overall zero rate"
-    );
-
-    Logger.log(
-      "PASS CR-8,9: Zero accesses handle cleanly without division errors (0.0%)"
-    );
-
-    // TEST 2: L1I independent counters
-    resetCacheModule();
-
-    cacheReadInstruction(0x08);
-
-    let stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l1iMisses === 1 &&
-      stats.l1iHits === 0,
-      "L1I Miss count"
-    );
-
-    assertCache_(
-      stats.l1dMisses === 0 &&
-      stats.l1dHits === 0,
-      "L1D unaffected by instruction fetch"
-    );
-
-    cacheReadInstruction(0x09);
-    cacheReadInstruction(0x0A);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l1iHits === 2 &&
-      stats.l1iMisses === 1,
-      "L1I Hit count"
-    );
-
-    const l1iMetrics = calculateCacheHitRate_(
-      stats.l1iHits,
-      stats.l1iMisses
-    );
-
-    assertCache_(
-      l1iMetrics.rate === (2 / 3) * 100,
-      "L1I Hit Rate calculation"
-    );
-
-    assertCache_(
-      l1iMetrics.formatted === "66.7%",
-      "L1I Hit Rate format"
-    );
-
-    Logger.log(
-      "PASS CR-1,4,5,6: L1I Hit/Miss detection and counters"
-    );
-
-    // TEST 3: L1D independent counters
-    resetCacheModule();
-
-    cacheReadData(0x30);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l1dMisses === 1 &&
-      stats.l1dHits === 0,
-      "L1D Miss count"
-    );
-
-    assertCache_(
-      stats.l1iMisses === 0 &&
-      stats.l1iHits === 0,
-      "L1I unaffected by data read"
-    );
-
-    cacheReadData(0x31);
-    cacheReadData(0x32);
-    cacheReadData(0x33);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l1dHits === 3 &&
-      stats.l1dMisses === 1,
-      "L1D Hit count"
-    );
-
-    const l1dMetrics = calculateCacheHitRate_(
-      stats.l1dHits,
-      stats.l1dMisses
-    );
-
-    assertCache_(
-      l1dMetrics.rate === 75 &&
-      l1dMetrics.formatted === "75.0%",
-      "L1D 75% rate"
-    );
-
-    Logger.log(
-      "PASS CR-2,4,5,6: L1D Hit/Miss detection and counters"
-    );
-
-    // TEST 4: L2 only counts L1 misses
-    resetCacheModule();
-
-    cacheReadInstruction(0x10);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l2Misses === 1 &&
-      stats.l2Hits === 0,
-      "L2 Miss on cold fetch"
-    );
-
-    cacheReadInstruction(0x11);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l2Misses === 1 &&
-      stats.l2Hits === 0,
-      "L2 counters unchanged on L1 hit"
-    );
-
-    cacheReadInstruction(0x40);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l2Misses === 2 &&
-      stats.l2Hits === 0,
-      "Second L2 miss"
-    );
-
-    cacheReadInstruction(0x10);
-
-    stats = getCacheStatistics();
-
-    assertCache_(
-      stats.l2Hits === 1 &&
-      stats.l2Misses === 2,
-      "L2 Hit registered"
-    );
-
-    const l2Metrics = calculateCacheHitRate_(
-      stats.l2Hits,
-      stats.l2Misses
-    );
-
-    assertCache_(
-      l2Metrics.formatted === "33.3%",
-      "L2 Hit Rate format"
-    );
-
-    Logger.log(
-      "PASS CR-3,7: L2 counters update only on L1 misses"
-    );
-
-    // TEST 5: Visual information
-    const state = getCacheState_();
-
-    assertCache_(
-      state.lastAccess.transferFlow.length > 0,
-      "Transfer flow must be present"
-    );
-
-    assertCache_(
-      state.lastAccess.hitStatus === "L2 HIT",
-      "Hit status must be L2 HIT"
-    );
-
-    Logger.log(
-      "PASS CR-12,14: Transfer flow and Hit/Miss status recorded"
-    );
-
-    // TEST 6: Reset counters
-    resetCacheModule();
-
-    const cleanStats = getCacheStatistics();
-
-    assertCache_(
-      cleanStats.l1iHits === 0 &&
-      cleanStats.l1iMisses === 0 &&
-      cleanStats.l1dHits === 0 &&
-      cleanStats.l1dMisses === 0 &&
-      cleanStats.l2Hits === 0 &&
-      cleanStats.l2Misses === 0,
-      "All counters must be zero after reset"
-    );
-
-    Logger.log(
-      "PASS CR-16: Performance counters reset cleanly"
-    );
-
-    // TEST 7: Benchmark
-    const benchMetrics =
-      runCacheBenchmarkProgram();
-
-    assertCache_(
-      benchMetrics.l1i.hits >= 3,
-      "Benchmark L1I hits"
-    );
-
-    assertCache_(
-      benchMetrics.l1d.hits >= 2,
-      "Benchmark L1D hits"
-    );
-
-    assertCache_(
-      benchMetrics.l2.hits >= 1,
-      "Benchmark L2 hits"
-    );
-
-    assertCache_(
-      benchMetrics.overall.total > 0,
-      "Benchmark total accesses"
-    );
-
-    Logger.log(
-      "PASS CR-10,11,13,15,17,18: Benchmark workload verified"
-    );
-
-    Logger.log(
-      "=== ALL TASK 10 CACHE HIT/MISS TESTS PASSED ==="
-    );
-
-    return {
-      passed: true,
-      criteriaTested: 18,
-      benchmark: benchMetrics
-    };
-
-  } finally {
-    // Benchmark restores RAM[43h] itself.
-    if (oldCache === null) {
-      props.deleteProperty(CACHE_STATE_KEY);
-      resetCacheModule();
-    } else {
-      props.setProperty(
-        CACHE_STATE_KEY,
-        oldCache
+  resetCPURegisters();
+  resetExecutionState();
+
+  const trace =
+    SpreadsheetApp
+      .getActive()
+      .getSheetByName(
+        "TRAZA"
       );
 
-      try {
-        syncCacheDashboard_(
-          JSON.parse(oldCache)
-        );
-      } catch (error) {
-        // UI unavailable.
-      }
-    }
+  const lastRow =
+    trace.getLastRow();
+
+  if (lastRow >= 6) {
+    trace.getRange(
+      6,
+      2,
+      lastRow - 5,
+      6
+    ).clearContent();
   }
+
+  SpreadsheetApp.flush();
 }
 
-// Preserve Task 09 test entry point.
-function testCacheModule() {
-  return testCacheHitMissMonitoring();
+// ------------------------------------------------------------
+// EXECUTION TESTS
+// ------------------------------------------------------------
+
+function testExecutionModule() {
+  Logger.log(
+    "=== MICRO-OP EXECUTION TEST ==="
+  );
+
+  const program =
+    assembleProgram([
+      "MOV AX, 5",
+      "ADD AX, 3",
+      "STORE [80h], AX",
+      "LOAD BX, [80h]",
+      "HLT"
+    ]);
+
+  loadProgram(program);
+  resetCpu();
+
+  let state =
+    getExecutionState_();
+  let guard = 0;
+
+  while (
+    !state.halted &&
+    guard < 350
+  ) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (!state.halted) {
+    throw new Error(
+      "HLT was not reached within 350 micro-steps."
+    );
+  }
+
+  if (
+    getRegister("AX") !== 8
+  ) {
+    throw new Error(
+      "AX expected 8."
+    );
+  }
+
+  if (
+    getRegister("BX") !== 8
+  ) {
+    throw new Error(
+      "BX expected 8."
+    );
+  }
+
+  if (
+    Read(0x80) !== 8
+  ) {
+    throw new Error(
+      "RAM[80h] expected 8."
+    );
+  }
+
+  if (
+    state.steps !== 62
+  ) {
+    throw new Error(
+      "Expected 62 clock micro-steps, got " +
+      state.steps
+    );
+  }
+
+  Logger.log(
+    "PASS: AX = 08h"
+  );
+  Logger.log(
+    "PASS: BX = 08h"
+  );
+  Logger.log(
+    "PASS: RAM[80h] = 08h"
+  );
+  Logger.log(
+    "PASS: 62 clock micro-steps executed"
+  );
+  Logger.log(
+    "PASS: CPU halted"
+  );
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    AX: getRegister("AX"),
+    BX: getRegister("BX"),
+    RAM80: Read(0x80)
+  };
+}
+
+function testFlagsDiagnostics() {
+  const program =
+    assembleProgram([
+      "MOV AX, 255",
+      "ADD AX, 1",
+      "HLT"
+    ]);
+
+  loadProgram(program);
+  resetCpu();
+
+  Logger.log(
+    "=== FLAGS DIAGNOSTICS ==="
+  );
+
+  let state =
+    getExecutionState_();
+  let guard = 0;
+
+  while (
+    !state.halted &&
+    guard < 100
+  ) {
+    state = stepCpu();
+
+    Logger.log(
+      "STEP " + state.steps +
+      " | MICRO=" +
+      state.lastMicroStep +
+      " | AX=" +
+      byteToHex_(
+        getRegister("AX")
+      ) +
+      " | ZF=" +
+      getFlag("ZF") +
+      " | CF=" +
+      getFlag("CF") +
+      " | SF=" +
+      getFlag("SF")
+    );
+
+    guard++;
+  }
+
+  const passed =
+    state.halted &&
+    getRegister("AX") === 0 &&
+    getFlag("ZF") === 1 &&
+    getFlag("CF") === 1 &&
+    getFlag("SF") === 0;
+
+  if (!passed) {
+    throw new Error(
+      "Flags or ALU micro-operation integration failed."
+    );
+  }
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    AX: getRegister("AX"),
+    ZF: getFlag("ZF"),
+    CF: getFlag("CF"),
+    SF: getFlag("SF")
+  };
+}
+
+// ------------------------------------------------------------
+// FOUR REGISTER INTEGRATION TEST
+// ------------------------------------------------------------
+
+function testPhase2ExecutionModule() {
+  Logger.log(
+    "=== FOUR REGISTER MICRO-OP TEST ==="
+  );
+
+  const lines = [
+    "MOV AX, FFh",
+    "MOV BX, 01h",
+    "MOV CX, 02h",
+    "MOV DX, 03h",
+    "ADD AX, BX",
+    "MOV CX, AX",
+    "SUB DX, BX",
+    "OR CX, DX",
+    "STORE [80h], CX",
+    "LOAD BX, [80h]",
+    "CMP BX, DX",
+    "HLT"
+  ];
+
+  const program =
+    assembleProgram(lines);
+
+  loadProgram(program);
+  resetCpu();
+
+  let state =
+    getExecutionState_();
+  let guard = 0;
+
+  while (
+    !state.halted &&
+    guard < 550
+  ) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (
+    !state.halted ||
+    state.steps !== 156
+  ) {
+    throw new Error(
+      "Expected 156 micro-steps and HLT; got " +
+      state.steps
+    );
+  }
+
+  const expected = {
+    AX: 0,
+    BX: 2,
+    CX: 2,
+    DX: 2
+  };
+
+  Object.keys(expected).forEach(
+    function(name) {
+      const actual =
+        getRegister(name);
+
+      if (
+        actual !== expected[name]
+      ) {
+        throw new Error(
+          name +
+          " expected " +
+          expected[name] +
+          ", got " +
+          actual
+        );
+      }
+    }
+  );
+
+  if (
+    Read(0x80) !== 2
+  ) {
+    throw new Error(
+      "RAM[80h] must contain 02h."
+    );
+  }
+
+  if (
+    getFlag("ZF") !== 1 ||
+    getFlag("CF") !== 0 ||
+    getFlag("SF") !== 0
+  ) {
+    throw new Error(
+      "CMP flags are incorrect."
+    );
+  }
+
+  if (
+    getRegister("IR") !==
+      ISA.HLT.opcode ||
+    getRegister("PC") !==
+      program.length
+  ) {
+    throw new Error(
+      "PC or IR execution state is incorrect."
+    );
+  }
+
+  if (
+    !isValidByte(
+      getRegister("MAR")
+    ) ||
+    !isValidByte(
+      getRegister("MDR")
+    )
+  ) {
+    throw new Error(
+      "MAR or MDR is out of 8-bit range."
+    );
+  }
+
+  Logger.log(
+    "PASS: 156 clock micro-steps and HLT."
+  );
+  Logger.log(
+    "PASS: AX, BX, CX, DX."
+  );
+  Logger.log(
+    "PASS: Virtual LOAD/STORE through MMU."
+  );
+  Logger.log(
+    "PASS: CMP flags."
+  );
+  Logger.log(
+    "PASS: PC, IR, MAR and MDR."
+  );
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    registers: {
+      AX: getRegister("AX"),
+      BX: getRegister("BX"),
+      CX: getRegister("CX"),
+      DX: getRegister("DX")
+    },
+    RAM80: Read(0x80),
+    flags: {
+      ZF: getFlag("ZF"),
+      CF: getFlag("CF"),
+      SF: getFlag("SF")
+    }
+  };
+}
+
+// ------------------------------------------------------------
+// TASK 08 CPU PAGE FAULT REGRESSION TEST
+// ------------------------------------------------------------
+
+function testTask08CPUPageFaultProgram() {
+  Logger.log(
+    "=== TASK 08 CPU PAGE FAULT PROGRAM ==="
+  );
+
+  const lines = [
+    "MOV AX, A5h",
+    "STORE [100h], AX",
+    "STORE [120h], AX",
+    "STORE [140h], AX",
+    "STORE [160h], AX",
+    "STORE [180h], AX",
+    "STORE [1A0h], AX",
+    "STORE [1C0h], AX",
+    "STORE [1E0h], AX",
+    "LOAD BX, [100h]",
+    "HLT"
+  ];
+
+  const program =
+    assembleProgram(lines);
+
+  loadProgram(program);
+
+  let state =
+    getExecutionState_();
+  let guard = 0;
+
+  while (
+    !state.halted &&
+    guard < 5000
+  ) {
+    state = stepCpu();
+    guard++;
+  }
+
+  if (!state.halted) {
+    throw new Error(
+      "CPU did not reach HLT. Steps: " +
+      state.steps
+    );
+  }
+
+  if (
+    getRegister("BX") !== 0xA5
+  ) {
+    throw new Error(
+      "Swap preservation failed. Expected BX=A5h, got " +
+      byteToHex_(
+        getRegister("BX")
+      ) +
+      "h"
+    );
+  }
+
+  const stats =
+    getPagingStatistics();
+
+  if (
+    stats.pageFaults < 8
+  ) {
+    throw new Error(
+      "The program did not generate enough Page Faults."
+    );
+  }
+
+  if (
+    stats.replacements < 1
+  ) {
+    throw new Error(
+      "The program did not perform page replacement."
+    );
+  }
+
+  if (
+    stats.swapWrites < 1
+  ) {
+    throw new Error(
+      "No dirty page was written to Swap."
+    );
+  }
+
+  Logger.log(
+    "PASS: CPU reached HLT."
+  );
+  Logger.log(
+    "PASS: Page Faults generated."
+  );
+  Logger.log(
+    "PASS: FIFO replacement executed."
+  );
+  Logger.log(
+    "PASS: Dirty pages written to Swap."
+  );
+  Logger.log(
+    "PASS: BX preserved A5h after Swap."
+  );
+
+  return {
+    passed: true,
+    microSteps: state.steps,
+    BX: getRegister("BX"),
+    paging: stats
+  };
 }
