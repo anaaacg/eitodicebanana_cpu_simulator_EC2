@@ -544,10 +544,23 @@ function executeMicroOperation_(wordOrStep, context) {
     });
   }
 
-  validateControlWord_(word);
+    validateControlWord_(word);
 
-  const s = word.signals;
-  let alu = null;
+    const s = word.signals;
+    let alu = null;
+    let keyboardByte = null;
+
+    // En_KBD consumes exactly one byte from the persistent FIFO.
+    if (s.En_KBD) {
+      if (typeof keyboardDequeue_ !== "function") {
+        throw new Error(
+          "Keyboard peripheral is not installed."
+        );
+      }
+
+      keyboardByte = keyboardDequeue_();
+      ctx.keyboardValue = keyboardByte;
+    }
 
   if (word.aluOp !== "NONE") {
     alu = calculateControlledALU_(
@@ -560,9 +573,16 @@ function executeMicroOperation_(wordOrStep, context) {
     ctx.aluFlags = alu.flags;
   }
 
-  const buses = resolveControlBuses_(word, ctx);
-  const internalValue = buses.internal.value;
-  const changes = [];
+    const buses = resolveControlBuses_(word, ctx);
+
+    // The resolved bus keeps the value for this clock step.
+    // Remove it from the context to prevent stale keyboard values.
+    if (s.En_KBD) {
+      delete ctx.keyboardValue;
+    }
+
+    const internalValue = buses.internal.value;
+    const changes = [];
 
   // MEMORY READ
   if (s.Mem_R) {
@@ -723,20 +743,16 @@ function executeMicroOperation_(wordOrStep, context) {
     }
   }
 
-  // KEYBOARD INPUT
-  if (s.En_KBD) {
-    if (
-      Array.isArray(ctx.keyboardQueue) &&
-      ctx.keyboardQueue.length
-    ) {
-      ctx.keyboardQueue.shift();
-
-    } else if (ctx.keyboardValue !== undefined) {
-      delete ctx.keyboardValue;
+    // KEYBOARD INPUT
+    // The byte was already removed from the persistent FIFO
+    // when En_KBD was activated.
+    if (s.En_KBD) {
+      changes.push(
+        "KEYBOARD " +
+        keyboardByte.toString(16).toUpperCase().padStart(2, "0") +
+        "h -> INTERNAL BUS"
+      );
     }
-
-    changes.push("KEYBOARD -> BUS");
-  }
 
   // PROGRAM COUNTER INCREMENT
   if (s.Inc_PC) {
@@ -1098,6 +1114,16 @@ function getInstructionMicroProgram_(instruction) {
         },
         condition: "ZF=0"
       });
+      break;
+
+    case "IN":
+      add(
+        "IN_T0_KEYBOARD_TO_REGISTER",
+        {
+          En_KBD: 1,
+          [registerLoad_(target)]: 1
+        }
+      );
       break;
 
     case "HLT":
