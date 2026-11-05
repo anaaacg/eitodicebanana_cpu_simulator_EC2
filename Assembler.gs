@@ -27,6 +27,7 @@ const ISA = {
   MOV_REG: { opcode: 0x02, bytes: 3 },
   LOAD:    { opcode: 0x03, bytes: 4 },
   STORE:   { opcode: 0x04, bytes: 4 },
+  IN:      { opcode: 0x05, bytes: 2 },
 
   ADD: { opcode: 0x10, bytes: 4 },
   SUB: { opcode: 0x11, bytes: 4 },
@@ -181,6 +182,18 @@ function assembleInstruction(line) {
   }
 
   let match;
+    // IN register, [KBD]
+  // Encoding: opcode, register
+  match = source.match(
+    /^IN\s+(AX|BX|CX|DX)\s*,\s*\[\s*KBD\s*\]$/
+  );
+
+  if (match) {
+    return [
+      ISA.IN.opcode,
+      asmRegisterCode_(match[1])
+    ];
+  }
 
   // INC / DEC / NOT
   match = source.match(
