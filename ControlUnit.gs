@@ -1,49 +1,28 @@
 /**
  * EitoDiceBanana CPU Simulator
- * Control Unit - Task 05
+ * Control Unit — Task 05 + Task 08
  *
- * Responsibility:
- * - Build a binary Control Word for each micro-operation.
- * - Validate register Enable/Load and memory control signals.
- * - Resolve the internal, address and external data buses.
- * - Enforce one transmitter per shared bus (inactive = HIGH-Z).
- * - Execute one micro-operation at a time.
- * - Provide FETCH and instruction micro-programs for the current ISA.
- *
- * Integration note:
- * Execution.gs must be connected to:
- * getFetchMicroProgram_()
- * getInstructionMicroProgram_()
- * executeMicroOperation_()
+ * Control Word, buses, ALU and micro-programs.
+ * Memory read/write can use the MMU through VirtualMemory.gs.
  */
 
-// ============================================================================
+// ------------------------------------------------------------
 // CONTROL WORD FORMAT
-// ============================================================================
+// ------------------------------------------------------------
 
 const CONTROL_WORD_SIGNAL_ORDER = [
-  // Program counter and address register
   "En_PC", "Ld_PC", "Inc_PC",
   "En_MAR", "Ld_MAR",
-
-  // Memory and memory data register
   "Mem_R", "Mem_W", "Ld_MDR", "En_MDR",
   "En_IR", "Ld_IR",
-
-  // General-purpose registers
   "En_AX", "Ld_AX",
   "En_BX", "Ld_BX",
   "En_CX", "Ld_CX",
   "En_DX", "Ld_DX",
-
-  // ALU
   "En_ALU", "Ld_ALU_A", "Ld_ALU_B", "Ld_FLAGS",
-
-  // I/O and immediate operand source
   "En_KBD", "Ld_LCD", "En_IMM"
 ];
 
-/** Four-bit operation codes encoded in the Control Word. */
 const CONTROL_ALU_OPS = {
   NONE: 0,
   ADD: 1,
@@ -76,28 +55,29 @@ const CONTROL_UNIT_INTERNAL_LOADS = [
   "Ld_ALU_A", "Ld_ALU_B", "Ld_LCD"
 ];
 
-// ============================================================================
+// ------------------------------------------------------------
 // CONTROL WORD BUILDERS
-// ============================================================================
+// ------------------------------------------------------------
 
-/**
- * Creates a zero-filled Control Word and applies overrides.
- */
 function createControlWord_(overrides) {
   const input = overrides || {};
   const suppliedSignals = input.signals || input;
   const signals = {};
 
-  CONTROL_WORD_SIGNAL_ORDER.forEach(function (name) {
+  CONTROL_WORD_SIGNAL_ORDER.forEach(function(name) {
     signals[name] = 0;
   });
 
-  CONTROL_WORD_SIGNAL_ORDER.forEach(function (name) {
+  CONTROL_WORD_SIGNAL_ORDER.forEach(function(name) {
     if (Object.prototype.hasOwnProperty.call(suppliedSignals, name)) {
       const value = suppliedSignals[name];
 
-      if (value !== 0 && value !== 1 &&
-          value !== false && value !== true) {
+      if (
+        value !== 0 &&
+        value !== 1 &&
+        value !== false &&
+        value !== true
+      ) {
         throw new Error(
           "Control signal " + name + " must be binary (0 or 1)."
         );
@@ -107,7 +87,7 @@ function createControlWord_(overrides) {
     }
   });
 
-  Object.keys(suppliedSignals).forEach(function (name) {
+  Object.keys(suppliedSignals).forEach(function(name) {
     if (
       name !== "signals" &&
       name !== "aluOp" &&
@@ -118,11 +98,20 @@ function createControlWord_(overrides) {
     }
   });
 
-  const requestedAluOp = input.aluOp || input.ALU_OP || "NONE";
-  const aluOpName = String(requestedAluOp).trim().toUpperCase();
+  const requestedAluOp =
+    input.aluOp || input.ALU_OP || "NONE";
 
-  if (!Object.prototype.hasOwnProperty.call(CONTROL_ALU_OPS, aluOpName)) {
-    throw new Error("Unknown ALU operation in Control Word: " + aluOpName);
+  const aluOpName = String(requestedAluOp)
+    .trim()
+    .toUpperCase();
+
+  if (!Object.prototype.hasOwnProperty.call(
+    CONTROL_ALU_OPS,
+    aluOpName
+  )) {
+    throw new Error(
+      "Unknown ALU operation in Control Word: " + aluOpName
+    );
   }
 
   const word = {
@@ -135,17 +124,18 @@ function createControlWord_(overrides) {
   return word;
 }
 
-/** Returns the Control Word as one binary string. */
 function controlWordToBinary_(word) {
   if (!word || !word.signals) {
     throw new Error("Invalid Control Word.");
   }
 
-  const signalBits = CONTROL_WORD_SIGNAL_ORDER.map(function (name) {
+  const signalBits = CONTROL_WORD_SIGNAL_ORDER.map(function(name) {
     const value = word.signals[name];
 
     if (value !== 0 && value !== 1) {
-      throw new Error("Invalid bit for control signal " + name);
+      throw new Error(
+        "Invalid bit for control signal " + name
+      );
     }
 
     return String(value);
@@ -155,30 +145,36 @@ function controlWordToBinary_(word) {
     ? word.aluOpCode
     : CONTROL_ALU_OPS[word.aluOp || "NONE"];
 
-  if (!Number.isInteger(aluCode) || aluCode < 0 || aluCode > 15) {
+  if (
+    !Number.isInteger(aluCode) ||
+    aluCode < 0 ||
+    aluCode > 15
+  ) {
     throw new Error("ALU_OP must fit in four bits.");
   }
 
   return signalBits + aluCode.toString(2).padStart(4, "0");
 }
 
-/** Creates a Control Word from a micro-operation descriptor. */
 function generateControlWord_(microOperation) {
   if (!microOperation) {
-    throw new Error("A micro-operation descriptor is required.");
+    throw new Error(
+      "A micro-operation descriptor is required."
+    );
   }
 
   return createControlWord_({
     signals: microOperation.signals || {},
-    aluOp: microOperation.aluOp || microOperation.ALU_OP || "NONE"
+    aluOp: microOperation.aluOp ||
+      microOperation.ALU_OP ||
+      "NONE"
   });
 }
 
-/** Returns the currently asserted signals. */
 function getActiveControlSignals_(word) {
   validateControlWord_(word);
 
-  const active = CONTROL_WORD_SIGNAL_ORDER.filter(function (name) {
+  const active = CONTROL_WORD_SIGNAL_ORDER.filter(function(name) {
     return word.signals[name] === 1;
   });
 
@@ -189,39 +185,52 @@ function getActiveControlSignals_(word) {
   return active;
 }
 
-// ============================================================================
-// CONTROL WORD VALIDATION AND BUS CONTENTION
-// ============================================================================
+// ------------------------------------------------------------
+// CONTROL WORD VALIDATION
+// ------------------------------------------------------------
 
 function validateControlWord_(word) {
   if (!word || !word.signals) {
-    throw new Error("Invalid Control Word: missing signals.");
+    throw new Error(
+      "Invalid Control Word: missing signals."
+    );
   }
 
-  CONTROL_WORD_SIGNAL_ORDER.forEach(function (name) {
+  CONTROL_WORD_SIGNAL_ORDER.forEach(function(name) {
     const value = word.signals[name];
 
     if (value !== 0 && value !== 1) {
-      throw new Error("Control signal " + name + " must be 0 or 1.");
+      throw new Error(
+        "Control signal " + name + " must be 0 or 1."
+      );
     }
   });
 
-  if (!Object.prototype.hasOwnProperty.call(CONTROL_ALU_OPS, word.aluOp)) {
+  if (!Object.prototype.hasOwnProperty.call(
+    CONTROL_ALU_OPS,
+    word.aluOp
+  )) {
     throw new Error("Invalid ALU_OP: " + word.aluOp);
   }
 
   const s = word.signals;
 
   if (s.Mem_R && s.Mem_W) {
-    throw new Error("Mem_R and Mem_W cannot be active together.");
+    throw new Error(
+      "Mem_R and Mem_W cannot be active together."
+    );
   }
 
   if (s.Mem_R && (!s.En_MAR || !s.Ld_MDR)) {
-    throw new Error("Mem_R requires En_MAR and Ld_MDR.");
+    throw new Error(
+      "Mem_R requires En_MAR and Ld_MDR."
+    );
   }
 
   if (s.Mem_W && (!s.En_MAR || !s.En_MDR)) {
-    throw new Error("Mem_W requires En_MAR and En_MDR.");
+    throw new Error(
+      "Mem_W requires En_MAR and En_MDR."
+    );
   }
 
   if (
@@ -244,25 +253,33 @@ function validateControlWord_(word) {
   }
 
   if (s.Ld_PC && s.Inc_PC) {
-    throw new Error("Ld_PC and Inc_PC cannot be active together.");
+    throw new Error(
+      "Ld_PC and Inc_PC cannot be active together."
+    );
   }
 
   if ((s.En_ALU || s.Ld_FLAGS) && word.aluOp === "NONE") {
-    throw new Error("En_ALU/Ld_FLAGS requires a valid ALU_OP.");
+    throw new Error(
+      "En_ALU/Ld_FLAGS requires a valid ALU_OP."
+    );
   }
 
   if (word.aluOp !== "NONE" && !(s.En_ALU || s.Ld_FLAGS)) {
-    throw new Error("ALU_OP is set but no ALU signal is active.");
+    throw new Error(
+      "ALU_OP is set but no ALU signal is active."
+    );
   }
 
   const internalDrivers = CONTROL_UNIT_INTERNAL_DRIVERS.filter(
-    function (name) {
-      if (name === "En_MDR" && s.Mem_W) return false;
+    function(name) {
+      if (name === "En_MDR" && s.Mem_W) {
+        return false;
+      }
+
       return s[name] === 1;
     }
   );
 
-    // Only one internal bus transmitter is allowed.
   if (internalDrivers.length > 1) {
     throw new Error(
       "Internal bus contention: " +
@@ -270,9 +287,6 @@ function validateControlWord_(word) {
     );
   }
 
-  // Every internal bus receiver requires a source.
-  // Memory read is the exception because RAM loads MDR
-  // through the external data bus.
   const activeBusLoads =
     CONTROL_UNIT_INTERNAL_LOADS.filter(function(signal) {
       return (
@@ -294,9 +308,9 @@ function validateControlWord_(word) {
   return true;
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // BUS CONTROLLER
-// ============================================================================
+// ------------------------------------------------------------
 
 function resolveControlBuses_(word, context) {
   validateControlWord_(word);
@@ -362,7 +376,7 @@ function resolveControlBuses_(word, context) {
   if (internalSources.length > 1) {
     throw new Error(
       "Internal bus contention: " +
-      internalSources.map(function (source) {
+      internalSources.map(function(source) {
         return source.name;
       }).join(" and ")
     );
@@ -402,12 +416,14 @@ function resolveControlBuses_(word, context) {
       source: "MEMORY",
       value: null
     };
+
   } else if (s.Mem_W && s.En_MDR) {
     dataBus = {
       state: "ACTIVE",
       source: "MDR",
       value: getRegister("MDR")
     };
+
   } else {
     dataBus = {
       state: "HIGH_Z",
@@ -423,15 +439,17 @@ function resolveControlBuses_(word, context) {
   };
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // CONTROLLED ALU
-// ============================================================================
+// ------------------------------------------------------------
 
 function calculateControlledALU_(operation, a, b) {
   const op = String(operation || "NONE").toUpperCase();
 
   if (!isValidByte(a)) {
-    throw new Error("ALU operand A must be an 8-bit value.");
+    throw new Error(
+      "ALU operand A must be an 8-bit value."
+    );
   }
 
   if (
@@ -508,9 +526,9 @@ function calculateControlledALU_(operation, a, b) {
   };
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // EXECUTE ONE MICRO-OPERATION
-// ============================================================================
+// ------------------------------------------------------------
 
 function executeMicroOperation_(wordOrStep, context) {
   const step = wordOrStep && wordOrStep.controlWord
@@ -521,7 +539,7 @@ function executeMicroOperation_(wordOrStep, context) {
   const ctx = context || {};
 
   if (step && step.inputs) {
-    Object.keys(step.inputs).forEach(function (key) {
+    Object.keys(step.inputs).forEach(function(key) {
       ctx[key] = step.inputs[key];
     });
   }
@@ -548,16 +566,34 @@ function executeMicroOperation_(wordOrStep, context) {
 
   // MEMORY READ
   if (s.Mem_R) {
-    const address = getRegister("MAR");
-    const memoryValue = Read(address);
+    const physicalRegisterAddress = getRegister("MAR");
+    let memoryValue;
+
+    if (ctx.virtualMemory === true) {
+      const virtualAddress =
+        Number.isInteger(ctx.virtualAddress)
+          ? ctx.virtualAddress
+          : physicalRegisterAddress;
+
+      memoryValue = readVirtualMemory(virtualAddress);
+
+      changes.push(
+        "VIRTUAL RAM[" + virtualAddress + "] -> MDR"
+      );
+
+    } else {
+      memoryValue = Read(physicalRegisterAddress);
+
+      changes.push(
+        "RAM[" + physicalRegisterAddress + "] -> MDR"
+      );
+    }
 
     buses.data.value = memoryValue;
-
     setRegister("MDR", memoryValue);
-    changes.push("MDR <- RAM[" + address + "]");
   }
 
-  // GENERAL REGISTER LOADS
+  // REGISTER LOADS
   if (s.Ld_PC) {
     setRegister("PC", internalValue);
     changes.push("PC <- BUS");
@@ -565,6 +601,24 @@ function executeMicroOperation_(wordOrStep, context) {
 
   if (s.Ld_MAR) {
     setRegister("MAR", internalValue);
+
+    // Build the full 9-bit virtual address.
+    // MAR itself remains an 8-bit register and stores the low byte.
+    if (ctx.virtualMemory === true) {
+      const high = Number.isInteger(ctx.virtualAddressHigh)
+        ? ctx.virtualAddressHigh
+        : 0;
+
+      ctx.virtualAddress =
+        (high << 8) | getRegister("MAR");
+
+      if (!isValidVirtualAddress(ctx.virtualAddress)) {
+        throw new Error(
+          "Invalid virtual address in MAR: " + ctx.virtualAddress
+        );
+      }
+    }
+
     changes.push("MAR <- BUS");
   }
 
@@ -573,17 +627,15 @@ function executeMicroOperation_(wordOrStep, context) {
     changes.push("IR <- BUS");
   }
 
-  ["AX", "BX", "CX", "DX"].forEach(
-    function (registerName) {
-      const loadSignal =
-        CONTROL_UNIT_REGISTER_SIGNALS[registerName].load;
+  ["AX", "BX", "CX", "DX"].forEach(function(registerName) {
+    const loadSignal =
+      CONTROL_UNIT_REGISTER_SIGNALS[registerName].load;
 
-      if (s[loadSignal]) {
-        setRegister(registerName, internalValue);
-        changes.push(registerName + " <- BUS");
-      }
+    if (s[loadSignal]) {
+      setRegister(registerName, internalValue);
+      changes.push(registerName + " <- BUS");
     }
-  );
+  });
 
   // MDR LOAD
   if (s.Ld_MDR && !s.Mem_R) {
@@ -645,14 +697,30 @@ function executeMicroOperation_(wordOrStep, context) {
 
   // MEMORY WRITE
   if (s.Mem_W) {
-    const address = getRegister("MAR");
+    const physicalRegisterAddress = getRegister("MAR");
     const data = getRegister("MDR");
 
     buses.data.value = data;
 
-    Write(address, data);
+    if (ctx.virtualMemory === true) {
+      const virtualAddress =
+        Number.isInteger(ctx.virtualAddress)
+          ? ctx.virtualAddress
+          : physicalRegisterAddress;
 
-    changes.push("RAM[" + address + "] <- MDR");
+      writeVirtualMemory(virtualAddress, data);
+
+      changes.push(
+        "VIRTUAL RAM[" + virtualAddress + "] <- MDR"
+      );
+
+    } else {
+      Write(physicalRegisterAddress, data);
+
+      changes.push(
+        "RAM[" + physicalRegisterAddress + "] <- MDR"
+      );
+    }
   }
 
   // KEYBOARD INPUT
@@ -662,6 +730,7 @@ function executeMicroOperation_(wordOrStep, context) {
       ctx.keyboardQueue.length
     ) {
       ctx.keyboardQueue.shift();
+
     } else if (ctx.keyboardValue !== undefined) {
       delete ctx.keyboardValue;
     }
@@ -693,21 +762,19 @@ function executeMicroOperation_(wordOrStep, context) {
   };
 }
 
-// ============================================================================
-// MICRO-PROGRAMS FOR THE CURRENT ISA
-// ============================================================================
+// ------------------------------------------------------------
+// MICRO-PROGRAM BUILDERS
+// ------------------------------------------------------------
 
 function makeMicroStep_(name, signals, options) {
   const opts = options || {};
 
   return {
     name: name,
-
     controlWord: createControlWord_({
       signals: signals || {},
       aluOp: opts.aluOp || "NONE"
     }),
-
     inputs: opts.inputs || {},
     condition: opts.condition || null,
     halt: Boolean(opts.halt)
@@ -716,34 +783,54 @@ function makeMicroStep_(name, signals, options) {
 
 /**
  * FETCH:
- * T0: PC -> MAR
- * T1: RAM -> MDR
- * T2: MDR -> IR and increment PC
+ * T0: PC -> MAR and build virtual address.
+ * T1: virtual memory -> MDR (MMU translation).
+ * T2: MDR -> IR and increment PC.
  */
 function getFetchMicroProgram_() {
   return [
-    makeMicroStep_("FETCH_T0_PC_TO_MAR", {
-      En_PC: 1,
-      Ld_MAR: 1
-    }),
+    makeMicroStep_(
+      "FETCH_T0_PC_TO_MAR",
+      {
+        En_PC: 1,
+        Ld_MAR: 1
+      },
+      {
+        inputs: {
+          virtualMemory: true,
+          virtualAddressHigh: 0
+        }
+      }
+    ),
 
-    makeMicroStep_("FETCH_T1_MEMORY_READ", {
-      En_MAR: 1,
-      Mem_R: 1,
-      Ld_MDR: 1
-    }),
+    makeMicroStep_(
+      "FETCH_T1_VIRTUAL_MEMORY_READ",
+      {
+        En_MAR: 1,
+        Mem_R: 1,
+        Ld_MDR: 1
+      },
+      {
+        inputs: {
+          virtualMemory: true
+        }
+      }
+    ),
 
-    makeMicroStep_("FETCH_T2_MDR_TO_IR", {
-      En_MDR: 1,
-      Ld_IR: 1,
-      Inc_PC: 1
-    })
+    makeMicroStep_(
+      "FETCH_T2_MDR_TO_IR",
+      {
+        En_MDR: 1,
+        Ld_IR: 1,
+        Inc_PC: 1
+      }
+    )
   ];
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // REGISTER HELPERS
-// ============================================================================
+// ------------------------------------------------------------
 
 function controlUnitRegisterName_(value) {
   if (
@@ -763,12 +850,7 @@ function controlUnitRegisterName_(value) {
     3: "DX"
   };
 
-  if (
-    Object.prototype.hasOwnProperty.call(
-      codeMap,
-      value
-    )
-  ) {
+  if (Object.prototype.hasOwnProperty.call(codeMap, value)) {
     return codeMap[value];
   }
 
@@ -785,13 +867,15 @@ function registerLoad_(registerName) {
   return CONTROL_UNIT_REGISTER_SIGNALS[registerName].load;
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // INSTRUCTION MICRO-PROGRAM GENERATOR
-// ============================================================================
+// ------------------------------------------------------------
 
 function getInstructionMicroProgram_(instruction) {
   if (!instruction || !instruction.type) {
-    throw new Error("A decoded instruction is required.");
+    throw new Error(
+      "A decoded instruction is required."
+    );
   }
 
   const type = String(instruction.type).toUpperCase();
@@ -803,9 +887,7 @@ function getInstructionMicroProgram_(instruction) {
   const steps = [];
 
   function add(name, signals, options) {
-    steps.push(
-      makeMicroStep_(name, signals, options)
-    );
+    steps.push(makeMicroStep_(name, signals, options));
   }
 
   function addALU(operation, writeBack) {
@@ -827,15 +909,20 @@ function getInstructionMicroProgram_(instruction) {
           [registerEnable_(source)]: 1,
           Ld_ALU_B: 1
         });
+
       } else {
-        add(type + "_T1_LOAD_IMMEDIATE", {
-          En_IMM: 1,
-          Ld_ALU_B: 1
-        }, {
-          inputs: {
-            immediate: instruction.operand
+        add(
+          type + "_T1_LOAD_IMMEDIATE",
+          {
+            En_IMM: 1,
+            Ld_ALU_B: 1
+          },
+          {
+            inputs: {
+              immediate: instruction.operand
+            }
           }
-        });
+        );
       }
     }
 
@@ -851,24 +938,25 @@ function getInstructionMicroProgram_(instruction) {
     add(
       type + "_T_FINAL_ALU_" +
       (writeBack ? "WRITEBACK" : "FLAGS"),
-
       finalSignals,
-
       { aluOp: operation }
     );
   }
 
   switch (type) {
-
     case "MOV_IMM":
-      add("MOV_IMM_WRITEBACK", {
-        En_IMM: 1,
-        [registerLoad_(target)]: 1
-      }, {
-        inputs: {
-          immediate: instruction.operand
+      add(
+        "MOV_IMM_WRITEBACK",
+        {
+          En_IMM: 1,
+          [registerLoad_(target)]: 1
+        },
+        {
+          inputs: {
+            immediate: instruction.operand
+          }
         }
-      });
+      );
       break;
 
     case "MOV_REG": {
@@ -902,20 +990,35 @@ function getInstructionMicroProgram_(instruction) {
       break;
 
     case "LOAD":
-      add("LOAD_T0_ADDRESS_TO_MAR", {
-        En_IMM: 1,
-        Ld_MAR: 1
-      }, {
-        inputs: {
-          immediate: instruction.address
+      add(
+        "LOAD_T0_VIRTUAL_ADDRESS_TO_MAR",
+        {
+          En_IMM: 1,
+          Ld_MAR: 1
+        },
+        {
+          inputs: {
+            immediate: instruction.address & 0xFF,
+            virtualMemory: true,
+            virtualAddressHigh:
+              Math.floor(instruction.address / 256)
+          }
         }
-      });
+      );
 
-      add("LOAD_T1_MEMORY_READ", {
-        En_MAR: 1,
-        Mem_R: 1,
-        Ld_MDR: 1
-      });
+      add(
+        "LOAD_T1_VIRTUAL_MEMORY_READ",
+        {
+          En_MAR: 1,
+          Mem_R: 1,
+          Ld_MDR: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true
+          }
+        }
+      );
 
       add("LOAD_T2_MDR_TO_REGISTER", {
         En_MDR: 1,
@@ -925,25 +1028,40 @@ function getInstructionMicroProgram_(instruction) {
       break;
 
     case "STORE":
-      add("STORE_T0_ADDRESS_TO_MAR", {
-        En_IMM: 1,
-        Ld_MAR: 1
-      }, {
-        inputs: {
-          immediate: instruction.address
+      add(
+        "STORE_T0_VIRTUAL_ADDRESS_TO_MAR",
+        {
+          En_IMM: 1,
+          Ld_MAR: 1
+        },
+        {
+          inputs: {
+            immediate: instruction.address & 0xFF,
+            virtualMemory: true,
+            virtualAddressHigh:
+              Math.floor(instruction.address / 256)
+          }
         }
-      });
+      );
 
       add("STORE_T1_REGISTER_TO_MDR", {
         [registerEnable_(target)]: 1,
         Ld_MDR: 1
       });
 
-      add("STORE_T2_MDR_TO_MEMORY", {
-        En_MAR: 1,
-        En_MDR: 1,
-        Mem_W: 1
-      });
+      add(
+        "STORE_T2_VIRTUAL_MEMORY_WRITE",
+        {
+          En_MAR: 1,
+          En_MDR: 1,
+          Mem_W: 1
+        },
+        {
+          inputs: {
+            virtualMemory: true
+          }
+        }
+      );
 
       break;
 
@@ -956,7 +1074,6 @@ function getInstructionMicroProgram_(instruction) {
           immediate: instruction.address
         }
       });
-
       break;
 
     case "JZ":
@@ -969,7 +1086,6 @@ function getInstructionMicroProgram_(instruction) {
         },
         condition: "ZF=1"
       });
-
       break;
 
     case "JNZ":
@@ -982,7 +1098,6 @@ function getInstructionMicroProgram_(instruction) {
         },
         condition: "ZF=0"
       });
-
       break;
 
     case "HLT":
@@ -1000,9 +1115,9 @@ function getInstructionMicroProgram_(instruction) {
   return steps;
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // CONDITIONAL MICRO-OPERATIONS
-// ============================================================================
+// ------------------------------------------------------------
 
 function shouldExecuteMicroStep_(step) {
   if (!step || !step.condition) {
@@ -1022,9 +1137,9 @@ function shouldExecuteMicroStep_(step) {
   );
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // TEST HELPERS
-// ============================================================================
+// ------------------------------------------------------------
 
 function assertControlUnit_(condition, message) {
   if (!condition) {
@@ -1034,9 +1149,9 @@ function assertControlUnit_(condition, message) {
   }
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // TEST 1: CONTROL WORD
-// ============================================================================
+// ------------------------------------------------------------
 
 function testControlWordModule() {
   const word = createControlWord_({
@@ -1049,7 +1164,7 @@ function testControlWordModule() {
 
   assertControlUnit_(
     word.binary.length ===
-    CONTROL_WORD_SIGNAL_ORDER.length + 4,
+      CONTROL_WORD_SIGNAL_ORDER.length + 4,
     "Incorrect Control Word width"
   );
 
@@ -1057,7 +1172,7 @@ function testControlWordModule() {
     CONTROL_WORD_SIGNAL_ORDER.length === 26,
     "Expected 26 control signals"
   );
-  
+
   assertControlUnit_(
     word.binary.length === 30,
     "Control Word must contain 30 bits"
@@ -1100,6 +1215,11 @@ function testControlWordModule() {
     "FETCH T2 must load IR"
   );
 
+  assertControlUnit_(
+    fetch[1].inputs.virtualMemory === true,
+    "FETCH memory read must use virtual memory."
+  );
+
   return {
     passed: true,
     controlWordBits: word.binary.length,
@@ -1108,13 +1228,11 @@ function testControlWordModule() {
   };
 }
 
-// ============================================================================
+// ------------------------------------------------------------
 // TEST 2: BUS CONTENTION AND HIGH-Z
-// ============================================================================
+// ------------------------------------------------------------
 
 function testControlBusContention() {
-
-  // TEST 1: Reject two simultaneous transmitters.
   let rejectedContention = false;
 
   try {
@@ -1137,8 +1255,6 @@ function testControlBusContention() {
     "Two internal transmitters must cause contention"
   );
 
-
-  // TEST 2: Real HIGH-Z bus resolution.
   const idleWord = createControlWord_({});
 
   const buses = resolveControlBuses_(
@@ -1161,8 +1277,6 @@ function testControlBusContention() {
     "Data bus must be HIGH_Z"
   );
 
-
-  // TEST 3: IR must transmit to the internal bus.
   const irWord = createControlWord_({
     signals: {
       En_IR: 1
@@ -1184,8 +1298,6 @@ function testControlBusContention() {
     "IR must be the active transmitter"
   );
 
-
-  // TEST 4: Reject a load with no transmitter.
   let rejectedMissingSource = false;
 
   try {
@@ -1207,26 +1319,26 @@ function testControlBusContention() {
     "A register load without a transmitter must be rejected"
   );
 
-
   return {
     passed: true,
     contentionRejected: rejectedContention,
     missingSourceRejected: rejectedMissingSource,
-
     buses: {
       internal: buses.internal.state,
       address: buses.address.state,
       data: buses.data.state
     },
-
     irTransmitter: irBus.internal.source
   };
 }
 
-function runControlUnitTests() {
+// ------------------------------------------------------------
+// RUN CONTROL UNIT TESTS
+// ------------------------------------------------------------
 
+function runControlUnitTests() {
   Logger.log("================================");
-  Logger.log("CONTROL UNIT - TASK 05");
+  Logger.log("CONTROL UNIT - TASK 05 / TASK 08");
   Logger.log("STARTING TESTS");
   Logger.log("================================");
 
@@ -1244,7 +1356,6 @@ function runControlUnitTests() {
   const failures = [];
 
   tests.forEach(function(test, index) {
-
     try {
       const result = test.fn();
 
@@ -1258,7 +1369,6 @@ function runControlUnitTests() {
       );
 
     } catch (error) {
-
       failures.push(
         test.name + ": " + error.message
       );
@@ -1268,13 +1378,11 @@ function runControlUnitTests() {
         ": " + error.message
       );
     }
-
   });
 
   Logger.log("================================");
 
   if (failures.length > 0) {
-
     Logger.log("CONTROL UNIT TESTS FAILED");
 
     throw new Error(

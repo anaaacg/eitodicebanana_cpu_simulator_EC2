@@ -103,9 +103,9 @@ const CONFIG = {
     assembler: true,
     execution: true,
 
-    buses: false,
-    cache: false,
-    mmu: false,
+    buses: true,
+    cache: true,
+    mmu: true,
     io: false
   },
 
