@@ -498,6 +498,15 @@ function decodeFetchedInstruction_(
       ins.address = read(0);
       break;
 
+    case "IN":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      ins.mode = "IO";
+      ins.operand = "KBD";
+      break;
+
     case "HLT":
       break;
 
@@ -1154,14 +1163,22 @@ function stepCpu() {
     microResult
   );
 
-  if (
-    typeof updateControlUnitPanel_ ===
-    "function"
-  ) {
-    updateControlUnitPanel_(
-      state
-    );
-  }
+    if (
+      typeof updateControlUnitPanel_ ===
+      "function"
+    ) {
+      updateControlUnitPanel_(
+        state
+      );
+    }
+
+    // Keep the BUSES dashboard synchronized with each micro-operation.
+    if (
+      typeof syncTask11BusesFromExecution_ ===
+      "function"
+    ) {
+      syncTask11BusesFromExecution_(state);
+    }
 
   return state;
 }
