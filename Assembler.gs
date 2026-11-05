@@ -1,9 +1,21 @@
+
 /**
  * EitoDiceBanana CPU Simulator
- * Assembler Module — Phase 2 / Task 08
+ * Assembler Module — Phase 2 / Tasks 08-10
  *
  * Virtual addresses: 000h - 1FFh (9 bits).
- * Physical RAM remains 256 bytes.
+ * Physical RAM: 256 bytes.
+ *
+ * LOAD PROGRAM:
+ * - Clears all 256 physical RAM bytes.
+ * - Loads machine code into the code segment.
+ * - Rebuilds the Page Table and backing store.
+ * - Invalidates caches and resets counters.
+ * - Resets CPU and execution state.
+ *
+ * RESET:
+ * - Restores the initial loaded program image.
+ * - Does not erase the loaded program.
  */
 
 // ------------------------------------------------------------
@@ -81,14 +93,18 @@ function asmParseNumber_(text) {
   }
 
   if (!isValidByte(result)) {
-    throw new Error("Value out of 8-bit range: " + text);
+    throw new Error(
+      "Value out of 8-bit range: " + text
+    );
   }
 
   return result;
 }
 
 /**
- * Parses a 9-bit virtual address, from 0 to 511.
+ * Parses a 9-bit virtual address.
+ *
+ * Range: 0-511 (000h-1FFh).
  * Accepted forms: 256, 1FFh, 0x1FF.
  */
 function asmParseVirtualAddress_(text) {
@@ -110,7 +126,11 @@ function asmParseVirtualAddress_(text) {
     );
   }
 
-  if (!Number.isInteger(result) || result < 0 || result > 511) {
+  if (
+    !Number.isInteger(result) ||
+    result < 0 ||
+    result > 511
+  ) {
     throw new Error(
       "Virtual address out of range: " + text +
       ". Expected 0-511 (000h-1FFh)."
@@ -290,7 +310,8 @@ function assembleProgram(lines) {
 
     } catch (error) {
       throw new Error(
-        "ASM line " + (index + 1) + ": " + error.message
+        "ASM line " + (index + 1) +
+        ": " + error.message
       );
     }
   });
@@ -314,15 +335,38 @@ function assembleProgram(lines) {
 }
 
 // ------------------------------------------------------------
-// LOAD PROGRAM INTO RAM
+// LOAD PROGRAM INTO PHYSICAL RAM
 // ------------------------------------------------------------
 
+/**
+ * Loads an assembled program into physical RAM.
+ *
+ * Unlike the previous implementation, this
+ * initializes all 256 physical bytes, not
+ * only the first 128 code bytes.
+ *
+ * Correct initialization sequence:
+ *
+ * 1. Validate the complete program.
+ * 2. Build a clean 256-byte RAM image.
+ * 3. Write the program into its code segment.
+ * 4. Reinitialize the Page Table and backing store.
+ * 5. Reset all cache lines and performance counters.
+ * 6. Reset CPU registers and execution state.
+ * 7. Initialize PC.
+ *
+ * The initialized physical memory becomes
+ * the baseline restored by CPU RESET.
+ */
 function loadProgram(program, startAddress) {
   if (startAddress === undefined) {
     startAddress = 0x00;
   }
 
-  if (!Array.isArray(program) || program.length === 0) {
+  if (
+    !Array.isArray(program) ||
+    program.length === 0
+  ) {
     throw new Error("Invalid or empty program.");
   }
 
@@ -356,49 +400,115 @@ function loadProgram(program, startAddress) {
     throw new Error("MEMORIA sheet not found.");
   }
 
-  // Clear the code segment only.
-  const emptyCode = Array.from(
-    { length: 8 },
-    function() {
-      return Array(16).fill("00");
-    }
-  );
+  // ------------------------------------------
+  // STEP 1: BUILD CLEAN PHYSICAL RAM
+  // ------------------------------------------
 
-  ram.getRange(6, 2, 8, 16)
-    .setNumberFormat("@")
-    .setValues(emptyCode);
+  const ramSize = CONFIG.MEMORY.size;
+  const ramColumns = CONFIG.MEMORY.columns;
+  const ramRows = CONFIG.MEMORY.rows;
 
-  const codeBytes = Array(128).fill("00");
-
-  program.forEach(function(byte, index) {
-    codeBytes[startAddress + index] = byteToHex_(byte);
-  });
-
-  const matrix = [];
-
-  for (let row = 0; row < 8; row++) {
-    matrix.push(
-      codeBytes.slice(row * 16, row * 16 + 16)
+  if (
+    ramSize !== 256 ||
+    ramRows !== 16 ||
+    ramColumns !== 16
+  ) {
+    throw new Error(
+      "Invalid RAM configuration. Expected 256 bytes (16 x 16)."
     );
   }
 
-  ram.getRange(6, 2, 8, 16)
+  // A fresh program always starts with
+  // zero-initialized physical RAM.
+  const ramBytes = Array(ramSize).fill(0);
+
+  // ------------------------------------------
+  // STEP 2: LOAD MACHINE CODE
+  // ------------------------------------------
+
+  program.forEach(function(byte, index) {
+    ramBytes[startAddress + index] = byte;
+  });
+
+  // Convert the complete image to the
+  // 16 x 16 hexadecimal memory matrix.
+  const matrix = [];
+
+  for (let row = 0; row < ramRows; row++) {
+    const start = row * ramColumns;
+
+    const rowBytes = ramBytes
+      .slice(start, start + ramColumns)
+      .map(byteToHex_);
+
+    matrix.push(rowBytes);
+  }
+
+  // ------------------------------------------
+  // STEP 3: WRITE ALL 256 PHYSICAL BYTES
+  // ------------------------------------------
+
+  const startRow = MEMORY_LAYOUT.startRow;
+  const startColumn = MEMORY_LAYOUT.startColumn;
+
+  ram.getRange(
+    startRow,
+    startColumn,
+    ramRows,
+    ramColumns
+  )
     .setNumberFormat("@")
     .setValues(matrix);
 
+  SpreadsheetApp.flush();
+
   clearMemoryHighlight();
 
-  // Reinitialize Page Table and backing storage from the
-  // real contents of the physical frames after loading code.
-  if (typeof resetPagingSystem === "function") {
+  // ------------------------------------------
+  // STEP 4: REBUILD MMU / PAGING / SWAP
+  // ------------------------------------------
+
+  // Paging captures the newly initialized
+  // physical RAM as the program baseline.
+  if (
+    typeof resetPagingSystem === "function"
+  ) {
     resetPagingSystem();
   }
 
-  // Reset CPU and execution state.
+  // ------------------------------------------
+  // STEP 5: INVALIDATE ALL CACHES
+  // ------------------------------------------
+
+  // Previous cache lines refer to the old
+  // program image and must not survive.
+  if (
+    typeof resetCacheModule === "function"
+  ) {
+    resetCacheModule();
+  }
+
+  // ------------------------------------------
+  // STEP 6: RESET CPU EXECUTION
+  // ------------------------------------------
+
   resetCPURegisters();
   resetExecutionState();
 
   setRegister("PC", startAddress);
+
+  Logger.log(
+    "LOAD PROGRAM: " + program.length +
+    " bytes loaded."
+  );
+
+  Logger.log(
+    "LOAD PROGRAM: All 256 physical RAM bytes initialized."
+  );
+
+  Logger.log(
+    "LOAD PROGRAM: MMU, paging, Swap, caches and CPU reset."
+  );
 
   return program.length;
 }
@@ -431,7 +541,8 @@ function loadProgramFromInterface() {
 
     SpreadsheetApp.getUi().alert(
       "Program loaded successfully.\n" +
-      count + " bytes written to RAM."
+      count + " bytes written to RAM.\n" +
+      "Physical memory initialized: 256 bytes."
     );
 
   } catch (error) {
@@ -450,7 +561,9 @@ function loadProgramFromInterface() {
 // ------------------------------------------------------------
 
 function testAssemblerModule() {
-  Logger.log("=== PHASE 2 / TASK 08 ASSEMBLER TEST ===");
+  Logger.log(
+    "=== PHASE 2 / TASK 08 ASSEMBLER TEST ==="
+  );
 
   const codes = {
     AX: 0x00,
@@ -467,9 +580,13 @@ function testAssemblerModule() {
     }
   });
 
-  Logger.log("PASS: AX, BX, CX, DX register codes.");
+  Logger.log(
+    "PASS: AX, BX, CX, DX register codes."
+  );
 
-  const movCX = assembleInstruction("MOV CX, 05h");
+  const movCX = assembleInstruction(
+    "MOV CX, 05h"
+  );
 
   if (
     JSON.stringify(movCX) !==
@@ -480,7 +597,9 @@ function testAssemblerModule() {
 
   Logger.log("PASS: MOV immediate.");
 
-  const movDX = assembleInstruction("MOV DX, CX");
+  const movDX = assembleInstruction(
+    "MOV DX, CX"
+  );
 
   if (
     JSON.stringify(movDX) !==
@@ -491,7 +610,9 @@ function testAssemblerModule() {
 
   Logger.log("PASS: MOV register.");
 
-  const add = assembleInstruction("ADD CX, DX");
+  const add = assembleInstruction(
+    "ADD CX, DX"
+  );
 
   if (
     JSON.stringify(add) !==
@@ -513,7 +634,9 @@ function testAssemblerModule() {
 
   Logger.log("PASS: Unary instruction.");
 
-  const andBytes = assembleInstruction("AND DX, CX");
+  const andBytes = assembleInstruction(
+    "AND DX, CX"
+  );
 
   if (
     JSON.stringify(andBytes) !==
@@ -524,55 +647,83 @@ function testAssemblerModule() {
 
   Logger.log("PASS: Logical instruction.");
 
-  // LOAD and STORE now encode a 9-bit virtual address.
-  const load80 = assembleInstruction("LOAD CX, [80h]");
-  const store81 = assembleInstruction("STORE [81h], DX");
+  // LOAD and STORE encode 9-bit addresses.
+  const load80 = assembleInstruction(
+    "LOAD CX, [80h]"
+  );
+
+  const store81 = assembleInstruction(
+    "STORE [81h], DX"
+  );
 
   if (
     JSON.stringify(load80) !==
     JSON.stringify([0x03, 0x02, 0x00, 0x80])
   ) {
-    throw new Error("LOAD 80h encoding failed.");
+    throw new Error(
+      "LOAD 80h encoding failed."
+    );
   }
 
   if (
     JSON.stringify(store81) !==
     JSON.stringify([0x04, 0x00, 0x81, 0x03])
   ) {
-    throw new Error("STORE 81h encoding failed.");
+    throw new Error(
+      "STORE 81h encoding failed."
+    );
   }
 
-  Logger.log("PASS: LOAD and STORE 8-bit virtual addresses.");
+  Logger.log(
+    "PASS: LOAD and STORE 8-bit virtual addresses."
+  );
 
-  const load100 = assembleInstruction("LOAD AX, [100h]");
-  const store1FF = assembleInstruction("STORE [1FFh], BX");
+  const load100 = assembleInstruction(
+    "LOAD AX, [100h]"
+  );
+
+  const store1FF = assembleInstruction(
+    "STORE [1FFh], BX"
+  );
 
   if (
     JSON.stringify(load100) !==
     JSON.stringify([0x03, 0x00, 0x01, 0x00])
   ) {
-    throw new Error("LOAD 100h encoding failed.");
+    throw new Error(
+      "LOAD 100h encoding failed."
+    );
   }
 
   if (
     JSON.stringify(store1FF) !==
     JSON.stringify([0x04, 0x01, 0xFF, 0x01])
   ) {
-    throw new Error("STORE 1FFh encoding failed.");
+    throw new Error(
+      "STORE 1FFh encoding failed."
+    );
   }
 
-  Logger.log("PASS: 9-bit virtual addresses 100h and 1FFh.");
+  Logger.log(
+    "PASS: 9-bit virtual addresses 100h and 1FFh."
+  );
 
-  const oldMov = assembleInstruction("MOV BX, AX");
+  const oldMov = assembleInstruction(
+    "MOV BX, AX"
+  );
 
   if (
     JSON.stringify(oldMov) !==
     JSON.stringify([0x02, 0x01, 0x00])
   ) {
-    throw new Error("Phase 1 compatibility failed.");
+    throw new Error(
+      "Phase 1 compatibility failed."
+    );
   }
 
-  Logger.log("PASS: Phase 1 register compatibility.");
+  Logger.log(
+    "PASS: Phase 1 register compatibility."
+  );
 
   let rejectedByte = false;
 
@@ -583,7 +734,9 @@ function testAssemblerModule() {
   }
 
   if (!rejectedByte) {
-    throw new Error("Invalid 8-bit immediate was accepted.");
+    throw new Error(
+      "Invalid 8-bit immediate was accepted."
+    );
   }
 
   let rejectedVirtualAddress = false;
@@ -595,10 +748,14 @@ function testAssemblerModule() {
   }
 
   if (!rejectedVirtualAddress) {
-    throw new Error("Virtual address above 1FFh was accepted.");
+    throw new Error(
+      "Virtual address above 1FFh was accepted."
+    );
   }
 
-  Logger.log("PASS: Invalid values and addresses rejected.");
+  Logger.log(
+    "PASS: Invalid values and addresses rejected."
+  );
 
   const program = assembleProgram([
     "MOV AX, 01h",
@@ -616,9 +773,14 @@ function testAssemblerModule() {
     );
   }
 
-  Logger.log("PASS: Complete four-register program assembled.");
+  Logger.log(
+    "PASS: Complete four-register program assembled."
+  );
 
-  const loadedBytes = loadProgram(program, 0x00);
+  const loadedBytes = loadProgram(
+    program,
+    0x00
+  );
 
   if (loadedBytes !== 25) {
     throw new Error("Program load failed.");
@@ -634,13 +796,36 @@ function testAssemblerModule() {
     );
   }
 
-  Logger.log("PASS: Program loaded into RAM.");
-  Logger.log("=== ALL ASSEMBLER TESTS PASSED ===");
+  Logger.log(
+    "PASS: Program loaded into RAM."
+  );
+
+  // Verify the entire RAM initialization,
+  // including the data segment.
+  if (
+    Read(0x80) !== 0 ||
+    Read(0xA0) !== 0 ||
+    Read(0xFF) !== 0
+  ) {
+    throw new Error(
+      "Physical RAM initialization failed. " +
+      "Data segment contains residual values."
+    );
+  }
+
+  Logger.log(
+    "PASS: All physical RAM data bytes initialized."
+  );
+
+  Logger.log(
+    "=== ALL ASSEMBLER TESTS PASSED ==="
+  );
 
   return {
     passed: true,
     programBytes: program.length,
     load80: load80,
-    store1FF: store1FF
+    store1FF: store1FF,
+    physicalRAMInitialized: true
   };
 }
