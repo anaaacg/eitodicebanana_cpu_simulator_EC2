@@ -325,6 +325,13 @@ function translateVirtualAddress(virtualAddress, isWrite) {
  * When omitted, FETCH/DECODE are instruction reads; otherwise data.
  */
 function readVirtualMemory(virtualAddress, accessType) {
+  validateVirtualAddress_(virtualAddress);
+
+  // Keyboard MMIO bypasses paging and the physical caches.
+  if (isKeyboardMappedAddress_(virtualAddress)) {
+    return keyboardReadMappedAddress_(virtualAddress);
+  }
+
   let translation = translateVirtualAddress(
     virtualAddress,
     false
@@ -392,6 +399,16 @@ function writeVirtualMemory(virtualAddress, value) {
   if (!Number.isInteger(value) || value < 0 || value > 255) {
     throw new Error(
       "Invalid byte value: " + value + ". Expected 0-255."
+    );
+  }
+
+  validateVirtualAddress_(virtualAddress);
+
+  // Keyboard MMIO is a read-only peripheral window.
+  // Normal virtual RAM writes must never overwrite it.
+  if (isKeyboardMappedAddress_(virtualAddress)) {
+    throw new Error(
+      "Keyboard MMIO addresses 1F8h-1FFh are reserved and read-only."
     );
   }
 
