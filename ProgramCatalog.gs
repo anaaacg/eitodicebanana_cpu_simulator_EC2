@@ -962,3 +962,7 @@ function testTask14ProgramsExecution() {
   };
 }
 
+function refreshTask15Catalog() {
+  const programs = refreshProgramCatalogSelector_();
+  Logger.log("Catalog updated: " + programs.join(", "));
+}
