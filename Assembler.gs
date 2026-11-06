@@ -28,6 +28,7 @@ const ISA = {
   LOAD:    { opcode: 0x03, bytes: 4 },
   STORE:   { opcode: 0x04, bytes: 4 },
   IN:      { opcode: 0x05, bytes: 2 },
+  OUT:     { opcode: 0x06, bytes: 2 },
 
   ADD: { opcode: 0x10, bytes: 4 },
   SUB: { opcode: 0x11, bytes: 4 },
@@ -191,6 +192,19 @@ function assembleInstruction(line) {
   if (match) {
     return [
       ISA.IN.opcode,
+      asmRegisterCode_(match[1])
+    ];
+  }
+
+  // OUT [LCD], register
+  // Encoding: opcode, register
+  match = source.match(
+    /^OUT\s+\[\s*LCD\s*\]\s*,\s*(AX|BX|CX|DX)$/
+  );
+
+  if (match) {
+    return [
+      ISA.OUT.opcode,
       asmRegisterCode_(match[1])
     ];
   }
@@ -507,6 +521,12 @@ function loadProgram(program, startAddress) {
 
   resetCPURegisters();
   resetExecutionState();
+
+  // Task 12: new program starts at LCD position 0.
+  // RAM has already been initialized to zero above.
+  if (typeof lcdResetController_ === "function") {
+    lcdResetController_();
+  }
 
   setRegister("PC", startAddress);
 
@@ -841,4 +861,38 @@ function testAssemblerModule() {
     store1FF: store1FF,
     physicalRAMInitialized: true
   };
+}
+
+// ------------------------------------------------------------
+// TASK 12 — OUT ASSEMBLER TEST (NON-DESTRUCTIVE)
+// ------------------------------------------------------------
+
+function testTask12AssemblerOut() {
+  const registers = ["AX", "BX", "CX", "DX"];
+
+  registers.forEach(function(name, code) {
+    const actual = assembleInstruction("OUT [LCD], " + name);
+    const expected = [0x06, code];
+
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error("OUT encoding failed for " + name);
+    }
+  });
+
+  const program = assembleProgram([
+    "MOV AX, 41h",
+    "OUT [LCD], AX",
+    "IN BX, [KBD]",
+    "HLT"
+  ]);
+
+  if (program.length !== 9 || program[4] !== 0x06 || program[5] !== 0x00) {
+    throw new Error("OUT integration with the existing ISA failed.");
+  }
+
+  Logger.log("PASS: OUT [LCD], reg encodes for AX/BX/CX/DX.");
+  Logger.log("PASS: OUT and IN coexist in the ISA.");
+  Logger.log("=== ALL TASK 12 ASSEMBLER TESTS PASSED ===");
+
+  return { passed: true, opcode: "06h", bytes: 2 };
 }

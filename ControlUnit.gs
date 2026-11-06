@@ -1,9 +1,13 @@
+
 /**
  * EitoDiceBanana CPU Simulator
- * Control Unit — Task 05 + Task 08
+ * Control Unit — Tasks 05, 08, 11 and 12
  *
  * Control Word, buses, ALU and micro-programs.
- * Memory read/write can use the MMU through VirtualMemory.gs.
+ * Memory operations use the MMU through VirtualMemory.gs.
+ *
+ * Task 11: Keyboard input through En_KBD.
+ * Task 12: LCD output through Ld_LCD.
  */
 
 // ------------------------------------------------------------
@@ -69,7 +73,12 @@ function createControlWord_(overrides) {
   });
 
   CONTROL_WORD_SIGNAL_ORDER.forEach(function(name) {
-    if (Object.prototype.hasOwnProperty.call(suppliedSignals, name)) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        suppliedSignals,
+        name
+      )
+    ) {
       const value = suppliedSignals[name];
 
       if (
@@ -79,11 +88,13 @@ function createControlWord_(overrides) {
         value !== true
       ) {
         throw new Error(
-          "Control signal " + name + " must be binary (0 or 1)."
+          "Control signal " + name +
+          " must be binary (0 or 1)."
         );
       }
 
-      signals[name] = value === 1 || value === true ? 1 : 0;
+      signals[name] =
+        value === 1 || value === true ? 1 : 0;
     }
   });
 
@@ -105,12 +116,15 @@ function createControlWord_(overrides) {
     .trim()
     .toUpperCase();
 
-  if (!Object.prototype.hasOwnProperty.call(
-    CONTROL_ALU_OPS,
-    aluOpName
-  )) {
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      CONTROL_ALU_OPS,
+      aluOpName
+    )
+  ) {
     throw new Error(
-      "Unknown ALU operation in Control Word: " + aluOpName
+      "Unknown ALU operation in Control Word: " +
+      aluOpName
     );
   }
 
@@ -121,6 +135,7 @@ function createControlWord_(overrides) {
   };
 
   word.binary = controlWordToBinary_(word);
+
   return word;
 }
 
@@ -129,31 +144,37 @@ function controlWordToBinary_(word) {
     throw new Error("Invalid Control Word.");
   }
 
-  const signalBits = CONTROL_WORD_SIGNAL_ORDER.map(function(name) {
-    const value = word.signals[name];
+  const signalBits = CONTROL_WORD_SIGNAL_ORDER
+    .map(function(name) {
+      const value = word.signals[name];
 
-    if (value !== 0 && value !== 1) {
-      throw new Error(
-        "Invalid bit for control signal " + name
-      );
-    }
+      if (value !== 0 && value !== 1) {
+        throw new Error(
+          "Invalid bit for control signal " + name
+        );
+      }
 
-    return String(value);
-  }).join("");
+      return String(value);
+    })
+    .join("");
 
-  const aluCode = word.aluOpCode !== undefined
-    ? word.aluOpCode
-    : CONTROL_ALU_OPS[word.aluOp || "NONE"];
+  const aluCode =
+    word.aluOpCode !== undefined
+      ? word.aluOpCode
+      : CONTROL_ALU_OPS[word.aluOp || "NONE"];
 
   if (
     !Number.isInteger(aluCode) ||
     aluCode < 0 ||
     aluCode > 15
   ) {
-    throw new Error("ALU_OP must fit in four bits.");
+    throw new Error(
+      "ALU_OP must fit in four bits."
+    );
   }
 
-  return signalBits + aluCode.toString(2).padStart(4, "0");
+  return signalBits +
+    aluCode.toString(2).padStart(4, "0");
 }
 
 function generateControlWord_(microOperation) {
@@ -165,7 +186,8 @@ function generateControlWord_(microOperation) {
 
   return createControlWord_({
     signals: microOperation.signals || {},
-    aluOp: microOperation.aluOp ||
+    aluOp:
+      microOperation.aluOp ||
       microOperation.ALU_OP ||
       "NONE"
   });
@@ -174,9 +196,10 @@ function generateControlWord_(microOperation) {
 function getActiveControlSignals_(word) {
   validateControlWord_(word);
 
-  const active = CONTROL_WORD_SIGNAL_ORDER.filter(function(name) {
-    return word.signals[name] === 1;
-  });
+  const active = CONTROL_WORD_SIGNAL_ORDER
+    .filter(function(name) {
+      return word.signals[name] === 1;
+    });
 
   if (word.aluOp !== "NONE") {
     active.push("ALU_OP=" + word.aluOp);
@@ -206,11 +229,15 @@ function validateControlWord_(word) {
     }
   });
 
-  if (!Object.prototype.hasOwnProperty.call(
-    CONTROL_ALU_OPS,
-    word.aluOp
-  )) {
-    throw new Error("Invalid ALU_OP: " + word.aluOp);
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      CONTROL_ALU_OPS,
+      word.aluOp
+    )
+  ) {
+    throw new Error(
+      "Invalid ALU_OP: " + word.aluOp
+    );
   }
 
   const s = word.signals;
@@ -221,13 +248,19 @@ function validateControlWord_(word) {
     );
   }
 
-  if (s.Mem_R && (!s.En_MAR || !s.Ld_MDR)) {
+  if (
+    s.Mem_R &&
+    (!s.En_MAR || !s.Ld_MDR)
+  ) {
     throw new Error(
       "Mem_R requires En_MAR and Ld_MDR."
     );
   }
 
-  if (s.Mem_W && (!s.En_MAR || !s.En_MDR)) {
+  if (
+    s.Mem_W &&
+    (!s.En_MAR || !s.En_MDR)
+  ) {
     throw new Error(
       "Mem_W requires En_MAR and En_MDR."
     );
@@ -258,27 +291,36 @@ function validateControlWord_(word) {
     );
   }
 
-  if ((s.En_ALU || s.Ld_FLAGS) && word.aluOp === "NONE") {
+  if (
+    (s.En_ALU || s.Ld_FLAGS) &&
+    word.aluOp === "NONE"
+  ) {
     throw new Error(
       "En_ALU/Ld_FLAGS requires a valid ALU_OP."
     );
   }
 
-  if (word.aluOp !== "NONE" && !(s.En_ALU || s.Ld_FLAGS)) {
+  if (
+    word.aluOp !== "NONE" &&
+    !(s.En_ALU || s.Ld_FLAGS)
+  ) {
     throw new Error(
       "ALU_OP is set but no ALU signal is active."
     );
   }
 
-  const internalDrivers = CONTROL_UNIT_INTERNAL_DRIVERS.filter(
-    function(name) {
-      if (name === "En_MDR" && s.Mem_W) {
-        return false;
-      }
+  // Exactly one transmitter may drive
+  // the shared internal bus.
+  const internalDrivers =
+    CONTROL_UNIT_INTERNAL_DRIVERS.filter(
+      function(name) {
+        if (name === "En_MDR" && s.Mem_W) {
+          return false;
+        }
 
-      return s[name] === 1;
-    }
-  );
+        return s[name] === 1;
+      }
+    );
 
   if (internalDrivers.length > 1) {
     throw new Error(
@@ -288,12 +330,14 @@ function validateControlWord_(word) {
   }
 
   const activeBusLoads =
-    CONTROL_UNIT_INTERNAL_LOADS.filter(function(signal) {
-      return (
-        s[signal] === 1 &&
-        !(signal === "Ld_MDR" && s.Mem_R === 1)
-      );
-    });
+    CONTROL_UNIT_INTERNAL_LOADS.filter(
+      function(signal) {
+        return (
+          s[signal] === 1 &&
+          !(signal === "Ld_MDR" && s.Mem_R === 1)
+        );
+      }
+    );
 
   if (
     activeBusLoads.length > 0 &&
@@ -327,7 +371,8 @@ function resolveControlBuses_(word, context) {
         !isValidByte(value)
       ) {
         throw new Error(
-          signal + " source value is unavailable or invalid."
+          signal +
+          " source value is unavailable or invalid."
         );
       }
 
@@ -347,15 +392,27 @@ function resolveControlBuses_(word, context) {
   addSource("En_DX", "DX", getRegister("DX"));
 
   if (s.En_MDR && !s.Mem_W) {
-    addSource("En_MDR", "MDR", getRegister("MDR"));
+    addSource(
+      "En_MDR",
+      "MDR",
+      getRegister("MDR")
+    );
   }
 
   if (s.En_ALU) {
-    addSource("En_ALU", "ALU", ctx.aluResult);
+    addSource(
+      "En_ALU",
+      "ALU",
+      ctx.aluResult
+    );
   }
 
   if (s.En_IMM) {
-    addSource("En_IMM", "IMMEDIATE", ctx.immediate);
+    addSource(
+      "En_IMM",
+      "IMMEDIATE",
+      ctx.immediate
+    );
   }
 
   if (s.En_KBD) {
@@ -370,15 +427,21 @@ function resolveControlBuses_(word, context) {
         : undefined;
     }
 
-    addSource("En_KBD", "KEYBOARD", keyboardValue);
+    addSource(
+      "En_KBD",
+      "KEYBOARD",
+      keyboardValue
+    );
   }
 
   if (internalSources.length > 1) {
     throw new Error(
       "Internal bus contention: " +
-      internalSources.map(function(source) {
-        return source.name;
-      }).join(" and ")
+      internalSources
+        .map(function(source) {
+          return source.name;
+        })
+        .join(" and ")
     );
   }
 
@@ -444,7 +507,9 @@ function resolveControlBuses_(word, context) {
 // ------------------------------------------------------------
 
 function calculateControlledALU_(operation, a, b) {
-  const op = String(operation || "NONE").toUpperCase();
+  const op = String(
+    operation || "NONE"
+  ).toUpperCase();
 
   if (!isValidByte(a)) {
     throw new Error(
@@ -459,7 +524,8 @@ function calculateControlledALU_(operation, a, b) {
     !isValidByte(b)
   ) {
     throw new Error(
-      "ALU operand B must be an 8-bit value for " + op + "."
+      "ALU operand B must be an 8-bit value for " +
+      op + "."
     );
   }
 
@@ -531,11 +597,15 @@ function calculateControlledALU_(operation, a, b) {
 // ------------------------------------------------------------
 
 function executeMicroOperation_(wordOrStep, context) {
-  const step = wordOrStep && wordOrStep.controlWord
-    ? wordOrStep
-    : null;
+  const step =
+    wordOrStep && wordOrStep.controlWord
+      ? wordOrStep
+      : null;
 
-  const word = step ? step.controlWord : wordOrStep;
+  const word = step
+    ? step.controlWord
+    : wordOrStep;
+
   const ctx = context || {};
 
   if (step && step.inputs) {
@@ -544,24 +614,28 @@ function executeMicroOperation_(wordOrStep, context) {
     });
   }
 
-    validateControlWord_(word);
+  validateControlWord_(word);
 
-    const s = word.signals;
-    let alu = null;
-    let keyboardByte = null;
+  const s = word.signals;
+  let alu = null;
+  let keyboardByte = null;
 
-    // En_KBD consumes exactly one byte from the persistent FIFO.
-    if (s.En_KBD) {
-      if (typeof keyboardDequeue_ !== "function") {
-        throw new Error(
-          "Keyboard peripheral is not installed."
-        );
-      }
-
-      keyboardByte = keyboardDequeue_();
-      ctx.keyboardValue = keyboardByte;
+  // KEYBOARD INPUT
+  // En_KBD consumes exactly one byte from FIFO.
+  if (s.En_KBD) {
+    if (
+      typeof keyboardDequeue_ !== "function"
+    ) {
+      throw new Error(
+        "Keyboard peripheral is not installed."
+      );
     }
 
+    keyboardByte = keyboardDequeue_();
+    ctx.keyboardValue = keyboardByte;
+  }
+
+  // ALU
   if (word.aluOp !== "NONE") {
     alu = calculateControlledALU_(
       word.aluOp,
@@ -573,20 +647,20 @@ function executeMicroOperation_(wordOrStep, context) {
     ctx.aluFlags = alu.flags;
   }
 
-    const buses = resolveControlBuses_(word, ctx);
+  const buses = resolveControlBuses_(word, ctx);
 
-    // The resolved bus keeps the value for this clock step.
-    // Remove it from the context to prevent stale keyboard values.
-    if (s.En_KBD) {
-      delete ctx.keyboardValue;
-    }
+  if (s.En_KBD) {
+    delete ctx.keyboardValue;
+  }
 
-    const internalValue = buses.internal.value;
-    const changes = [];
+  const internalValue = buses.internal.value;
+  const changes = [];
 
   // MEMORY READ
   if (s.Mem_R) {
-    const physicalRegisterAddress = getRegister("MAR");
+    const physicalRegisterAddress =
+      getRegister("MAR");
+
     let memoryValue;
 
     if (ctx.virtualMemory === true) {
@@ -595,17 +669,21 @@ function executeMicroOperation_(wordOrStep, context) {
           ? ctx.virtualAddress
           : physicalRegisterAddress;
 
-      memoryValue = readVirtualMemory(virtualAddress);
+      memoryValue =
+        readVirtualMemory(virtualAddress);
 
       changes.push(
-        "VIRTUAL RAM[" + virtualAddress + "] -> MDR"
+        "VIRTUAL RAM[" +
+        virtualAddress + "] -> MDR"
       );
 
     } else {
-      memoryValue = Read(physicalRegisterAddress);
+      memoryValue =
+        Read(physicalRegisterAddress);
 
       changes.push(
-        "RAM[" + physicalRegisterAddress + "] -> MDR"
+        "RAM[" +
+        physicalRegisterAddress + "] -> MDR"
       );
     }
 
@@ -622,19 +700,23 @@ function executeMicroOperation_(wordOrStep, context) {
   if (s.Ld_MAR) {
     setRegister("MAR", internalValue);
 
-    // Build the full 9-bit virtual address.
-    // MAR itself remains an 8-bit register and stores the low byte.
     if (ctx.virtualMemory === true) {
-      const high = Number.isInteger(ctx.virtualAddressHigh)
-        ? ctx.virtualAddressHigh
-        : 0;
+      const high =
+        Number.isInteger(ctx.virtualAddressHigh)
+          ? ctx.virtualAddressHigh
+          : 0;
 
       ctx.virtualAddress =
         (high << 8) | getRegister("MAR");
 
-      if (!isValidVirtualAddress(ctx.virtualAddress)) {
+      if (
+        !isValidVirtualAddress(
+          ctx.virtualAddress
+        )
+      ) {
         throw new Error(
-          "Invalid virtual address in MAR: " + ctx.virtualAddress
+          "Invalid virtual address in MAR: " +
+          ctx.virtualAddress
         );
       }
     }
@@ -647,15 +729,25 @@ function executeMicroOperation_(wordOrStep, context) {
     changes.push("IR <- BUS");
   }
 
-  ["AX", "BX", "CX", "DX"].forEach(function(registerName) {
-    const loadSignal =
-      CONTROL_UNIT_REGISTER_SIGNALS[registerName].load;
+  ["AX", "BX", "CX", "DX"].forEach(
+    function(registerName) {
+      const loadSignal =
+        CONTROL_UNIT_REGISTER_SIGNALS[
+          registerName
+        ].load;
 
-    if (s[loadSignal]) {
-      setRegister(registerName, internalValue);
-      changes.push(registerName + " <- BUS");
+      if (s[loadSignal]) {
+        setRegister(
+          registerName,
+          internalValue
+        );
+
+        changes.push(
+          registerName + " <- BUS"
+        );
+      }
     }
-  });
+  );
 
   // MDR LOAD
   if (s.Ld_MDR && !s.Mem_R) {
@@ -678,7 +770,8 @@ function executeMicroOperation_(wordOrStep, context) {
   if (s.Ld_FLAGS) {
     if (!ctx.aluFlags) {
       throw new Error(
-        "Ld_FLAGS is active but no ALU result/flags are available."
+        "Ld_FLAGS is active but no ALU " +
+        "result/flags are available."
       );
     }
 
@@ -689,35 +782,54 @@ function executeMicroOperation_(wordOrStep, context) {
     changes.push("FLAGS <- ALU");
   }
 
-  // LCD OUTPUT
+  // LCD OUTPUT — TASK 12
+  //
+  // Ld_LCD is a receiver.
+  // The source register drives the internal bus.
+  // LCD.gs writes the exact 8-bit byte into
+  // physical video buffer F8h-FFh.
   if (s.Ld_LCD) {
     if (
       internalValue === null ||
-      internalValue === undefined
+      internalValue === undefined ||
+      !isValidByte(internalValue)
     ) {
       throw new Error(
-        "Ld_LCD requires a valid internal-bus value."
+        "Ld_LCD requires a valid " +
+        "8-bit internal-bus value."
       );
     }
 
-    const charCode =
-      internalValue >= 32 && internalValue <= 126
-        ? internalValue
-        : 63;
+    if (
+      typeof lcdWriteByte_ !== "function"
+    ) {
+      throw new Error(
+        "LCD.gs is not installed. " +
+        "lcdWriteByte_ is required."
+      );
+    }
 
-    ctx.lcdBuffer =
-      String(ctx.lcdBuffer || "") +
-      String.fromCharCode(charCode);
+    const transfer =
+      lcdWriteByte_(internalValue);
 
-    ctx.lcdBuffer = ctx.lcdBuffer.slice(-8);
     ctx.lastLCDValue = internalValue;
+    ctx.lastLCDPosition = transfer.position;
+    ctx.lastLCDAddress =
+      transfer.physicalAddress;
 
-    changes.push("LCD <- BUS");
+    changes.push(
+      "LCD[" + transfer.position +
+      "] <- " +
+      byteToHex_(internalValue) +
+      "h via INTERNAL BUS"
+    );
   }
 
   // MEMORY WRITE
   if (s.Mem_W) {
-    const physicalRegisterAddress = getRegister("MAR");
+    const physicalRegisterAddress =
+      getRegister("MAR");
+
     const data = getRegister("MDR");
 
     buses.data.value = data;
@@ -728,31 +840,40 @@ function executeMicroOperation_(wordOrStep, context) {
           ? ctx.virtualAddress
           : physicalRegisterAddress;
 
-      writeVirtualMemory(virtualAddress, data);
+      writeVirtualMemory(
+        virtualAddress,
+        data
+      );
 
       changes.push(
-        "VIRTUAL RAM[" + virtualAddress + "] <- MDR"
+        "VIRTUAL RAM[" +
+        virtualAddress + "] <- MDR"
       );
 
     } else {
-      Write(physicalRegisterAddress, data);
+      Write(
+        physicalRegisterAddress,
+        data
+      );
 
       changes.push(
-        "RAM[" + physicalRegisterAddress + "] <- MDR"
+        "RAM[" +
+        physicalRegisterAddress + "] <- MDR"
       );
     }
   }
 
-    // KEYBOARD INPUT
-    // The byte was already removed from the persistent FIFO
-    // when En_KBD was activated.
-    if (s.En_KBD) {
-      changes.push(
-        "KEYBOARD " +
-        keyboardByte.toString(16).toUpperCase().padStart(2, "0") +
-        "h -> INTERNAL BUS"
-      );
-    }
+  // KEYBOARD TRANSFER DIAGNOSTICS
+  if (s.En_KBD) {
+    changes.push(
+      "KEYBOARD " +
+      keyboardByte
+        .toString(16)
+        .toUpperCase()
+        .padStart(2, "0") +
+      "h -> INTERNAL BUS"
+    );
+  }
 
   // PROGRAM COUNTER INCREMENT
   if (s.Inc_PC) {
@@ -800,7 +921,7 @@ function makeMicroStep_(name, signals, options) {
 /**
  * FETCH:
  * T0: PC -> MAR and build virtual address.
- * T1: virtual memory -> MDR (MMU translation).
+ * T1: virtual memory -> MDR.
  * T2: MDR -> IR and increment PC.
  */
 function getFetchMicroProgram_() {
@@ -866,21 +987,31 @@ function controlUnitRegisterName_(value) {
     3: "DX"
   };
 
-  if (Object.prototype.hasOwnProperty.call(codeMap, value)) {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      codeMap,
+      value
+    )
+  ) {
     return codeMap[value];
   }
 
   throw new Error(
-    "Invalid register in micro-program: " + value
+    "Invalid register in micro-program: " +
+    value
   );
 }
 
 function registerEnable_(registerName) {
-  return CONTROL_UNIT_REGISTER_SIGNALS[registerName].enable;
+  return CONTROL_UNIT_REGISTER_SIGNALS[
+    registerName
+  ].enable;
 }
 
 function registerLoad_(registerName) {
-  return CONTROL_UNIT_REGISTER_SIGNALS[registerName].load;
+  return CONTROL_UNIT_REGISTER_SIGNALS[
+    registerName
+  ].load;
 }
 
 // ------------------------------------------------------------
@@ -894,16 +1025,26 @@ function getInstructionMicroProgram_(instruction) {
     );
   }
 
-  const type = String(instruction.type).toUpperCase();
+  const type = String(
+    instruction.type
+  ).toUpperCase();
 
   const target = instruction.register
-    ? controlUnitRegisterName_(instruction.register)
+    ? controlUnitRegisterName_(
+        instruction.register
+      )
     : null;
 
   const steps = [];
 
   function add(name, signals, options) {
-    steps.push(makeMicroStep_(name, signals, options));
+    steps.push(
+      makeMicroStep_(
+        name,
+        signals,
+        options
+      )
+    );
   }
 
   function addALU(operation, writeBack) {
@@ -919,7 +1060,9 @@ function getInstructionMicroProgram_(instruction) {
     ) {
       if (instruction.mode === "REGISTER") {
         const source =
-          controlUnitRegisterName_(instruction.operand);
+          controlUnitRegisterName_(
+            instruction.operand
+          );
 
         add(type + "_T1_LOAD_ALU_B", {
           [registerEnable_(source)]: 1,
@@ -948,14 +1091,18 @@ function getInstructionMicroProgram_(instruction) {
 
     if (writeBack) {
       finalSignals.En_ALU = 1;
-      finalSignals[registerLoad_(target)] = 1;
+      finalSignals[
+        registerLoad_(target)
+      ] = 1;
     }
 
     add(
       type + "_T_FINAL_ALU_" +
-      (writeBack ? "WRITEBACK" : "FLAGS"),
+        (writeBack ? "WRITEBACK" : "FLAGS"),
       finalSignals,
-      { aluOp: operation }
+      {
+        aluOp: operation
+      }
     );
   }
 
@@ -977,7 +1124,9 @@ function getInstructionMicroProgram_(instruction) {
 
     case "MOV_REG": {
       const source =
-        controlUnitRegisterName_(instruction.operand);
+        controlUnitRegisterName_(
+          instruction.operand
+        );
 
       add("MOV_REG_TRANSFER", {
         [registerEnable_(source)]: 1,
@@ -1014,10 +1163,13 @@ function getInstructionMicroProgram_(instruction) {
         },
         {
           inputs: {
-            immediate: instruction.address & 0xFF,
+            immediate:
+              instruction.address & 0xFF,
             virtualMemory: true,
             virtualAddressHigh:
-              Math.floor(instruction.address / 256)
+              Math.floor(
+                instruction.address / 256
+              )
           }
         }
       );
@@ -1036,10 +1188,13 @@ function getInstructionMicroProgram_(instruction) {
         }
       );
 
-      add("LOAD_T2_MDR_TO_REGISTER", {
-        En_MDR: 1,
-        [registerLoad_(target)]: 1
-      });
+      add(
+        "LOAD_T2_MDR_TO_REGISTER",
+        {
+          En_MDR: 1,
+          [registerLoad_(target)]: 1
+        }
+      );
 
       break;
 
@@ -1052,18 +1207,24 @@ function getInstructionMicroProgram_(instruction) {
         },
         {
           inputs: {
-            immediate: instruction.address & 0xFF,
+            immediate:
+              instruction.address & 0xFF,
             virtualMemory: true,
             virtualAddressHigh:
-              Math.floor(instruction.address / 256)
+              Math.floor(
+                instruction.address / 256
+              )
           }
         }
       );
 
-      add("STORE_T1_REGISTER_TO_MDR", {
-        [registerEnable_(target)]: 1,
-        Ld_MDR: 1
-      });
+      add(
+        "STORE_T1_REGISTER_TO_MDR",
+        {
+          [registerEnable_(target)]: 1,
+          Ld_MDR: 1
+        }
+      );
 
       add(
         "STORE_T2_VIRTUAL_MEMORY_WRITE",
@@ -1082,40 +1243,53 @@ function getInstructionMicroProgram_(instruction) {
       break;
 
     case "JMP":
-      add("JMP_LOAD_PC", {
-        En_IMM: 1,
-        Ld_PC: 1
-      }, {
-        inputs: {
-          immediate: instruction.address
+      add(
+        "JMP_LOAD_PC",
+        {
+          En_IMM: 1,
+          Ld_PC: 1
+        },
+        {
+          inputs: {
+            immediate: instruction.address
+          }
         }
-      });
+      );
       break;
 
     case "JZ":
-      add("JZ_LOAD_PC", {
-        En_IMM: 1,
-        Ld_PC: 1
-      }, {
-        inputs: {
-          immediate: instruction.address
+      add(
+        "JZ_LOAD_PC",
+        {
+          En_IMM: 1,
+          Ld_PC: 1
         },
-        condition: "ZF=1"
-      });
+        {
+          inputs: {
+            immediate: instruction.address
+          },
+          condition: "ZF=1"
+        }
+      );
       break;
 
     case "JNZ":
-      add("JNZ_LOAD_PC", {
-        En_IMM: 1,
-        Ld_PC: 1
-      }, {
-        inputs: {
-          immediate: instruction.address
+      add(
+        "JNZ_LOAD_PC",
+        {
+          En_IMM: 1,
+          Ld_PC: 1
         },
-        condition: "ZF=0"
-      });
+        {
+          inputs: {
+            immediate: instruction.address
+          },
+          condition: "ZF=0"
+        }
+      );
       break;
 
+    // TASK 11 — KEYBOARD INPUT
     case "IN":
       add(
         "IN_T0_KEYBOARD_TO_REGISTER",
@@ -1126,15 +1300,38 @@ function getInstructionMicroProgram_(instruction) {
       );
       break;
 
+    // TASK 12 — LCD OUTPUT
+    //
+    // Source register -> Internal Bus -> LCD.
+    //
+    // One active transmitter:
+    // En_AX / En_BX / En_CX / En_DX.
+    //
+    // LCD is a receiver, enabled by Ld_LCD.
+    case "OUT":
+      add(
+        "OUT_T0_REGISTER_TO_LCD",
+        {
+          [registerEnable_(target)]: 1,
+          Ld_LCD: 1
+        }
+      );
+      break;
+
     case "HLT":
-      add("HALT", {}, {
-        halt: true
-      });
+      add(
+        "HALT",
+        {},
+        {
+          halt: true
+        }
+      );
       break;
 
     default:
       throw new Error(
-        "No micro-program defined for instruction: " + type
+        "No micro-program defined for instruction: " +
+        type
       );
   }
 
@@ -1159,7 +1356,8 @@ function shouldExecuteMicroStep_(step) {
   }
 
   throw new Error(
-    "Unknown micro-step condition: " + step.condition
+    "Unknown micro-step condition: " +
+    step.condition
   );
 }
 
@@ -1170,7 +1368,8 @@ function shouldExecuteMicroStep_(step) {
 function assertControlUnit_(condition, message) {
   if (!condition) {
     throw new Error(
-      "CONTROL UNIT TEST FAILED: " + message
+      "CONTROL UNIT TEST FAILED: " +
+      message
     );
   }
 }
@@ -1359,12 +1558,165 @@ function testControlBusContention() {
 }
 
 // ------------------------------------------------------------
+// TASK 12: LCD CONTROL SIGNAL AND BUS TEST
+// ------------------------------------------------------------
+
+/**
+ * Non-destructive:
+ * validates the OUT microprogram and bus signals.
+ * Does not write to the LCD or modify memory.
+ */
+function testTask12LCDControlUnit() {
+  const registers = [
+    "AX", "BX", "CX", "DX"
+  ];
+
+  registers.forEach(function(registerName) {
+    const program = getInstructionMicroProgram_({
+      type: "OUT",
+      register: registerName,
+      mode: "IO",
+      operand: "LCD"
+    });
+
+    assertControlUnit_(
+      program.length === 1,
+      "OUT must execute in one micro-operation."
+    );
+
+    const step = program[0];
+    const word = step.controlWord;
+    const enable =
+      CONTROL_UNIT_REGISTER_SIGNALS[
+        registerName
+      ].enable;
+
+    assertControlUnit_(
+      step.name === "OUT_T0_REGISTER_TO_LCD",
+      "Incorrect OUT micro-operation name."
+    );
+
+    assertControlUnit_(
+      word.signals[enable] === 1,
+      registerName + " must drive the bus."
+    );
+
+    assertControlUnit_(
+      word.signals.Ld_LCD === 1,
+      "Ld_LCD must be enabled."
+    );
+
+    validateControlWord_(word);
+
+    const drivers =
+      CONTROL_UNIT_INTERNAL_DRIVERS.filter(
+        function(name) {
+          return word.signals[name] === 1;
+        }
+      );
+
+    assertControlUnit_(
+      drivers.length === 1 &&
+      drivers[0] === enable,
+      "OUT must use exactly one transmitter."
+    );
+  });
+
+  const idleWord = createControlWord_({});
+  const idleBuses = resolveControlBuses_(
+    idleWord,
+    {}
+  );
+
+  assertControlUnit_(
+    idleBuses.internal.state === "HIGH_Z",
+    "Internal bus must remain HIGH_Z when idle."
+  );
+
+  assertControlUnit_(
+    idleWord.signals.Ld_LCD === 0,
+    "Ld_LCD must be disabled when idle."
+  );
+
+  let rejectedContention = false;
+
+  try {
+    const invalid = createControlWord_({
+      signals: {
+        En_AX: 1,
+        En_BX: 1,
+        Ld_LCD: 1
+      }
+    });
+
+    validateControlWord_(invalid);
+  } catch (error) {
+    rejectedContention =
+      /contention/i.test(error.message);
+  }
+
+  assertControlUnit_(
+    rejectedContention,
+    "LCD transfer must reject two transmitters."
+  );
+
+  let rejectedMissingSource = false;
+
+  try {
+    const invalid = createControlWord_({
+      signals: {
+        Ld_LCD: 1
+      }
+    });
+
+    validateControlWord_(invalid);
+  } catch (error) {
+    rejectedMissingSource =
+      /without transmitter/i.test(
+        error.message
+      );
+  }
+
+  assertControlUnit_(
+    rejectedMissingSource,
+    "LCD cannot load without a transmitter."
+  );
+
+  Logger.log(
+    "PASS: OUT microprogram uses a single register transmitter."
+  );
+
+  Logger.log(
+    "PASS: Ld_LCD is enabled during OUT."
+  );
+
+  Logger.log(
+    "PASS: Idle bus remains HIGH_Z."
+  );
+
+  Logger.log(
+    "PASS: Bus contention and missing transmitter rejected."
+  );
+
+  Logger.log(
+    "=== ALL TASK 12 LCD CONTROL UNIT TESTS PASSED ==="
+  );
+
+  return {
+    passed: true,
+    registersTested: registers.length,
+    signal: "Ld_LCD",
+    microSteps: 1
+  };
+}
+
+// ------------------------------------------------------------
 // RUN CONTROL UNIT TESTS
 // ------------------------------------------------------------
 
 function runControlUnitTests() {
   Logger.log("================================");
-  Logger.log("CONTROL UNIT - TASK 05 / TASK 08");
+  Logger.log("CONTROL UNIT - TASKS 05 / 08 / 11 / 12");
   Logger.log("STARTING TESTS");
   Logger.log("================================");
 
@@ -1376,6 +1728,10 @@ function runControlUnitTests() {
     {
       name: "BUS CONTENTION AND HIGH-Z",
       fn: testControlBusContention
+    },
+    {
+      name: "LCD OUTPUT CONTROL",
+      fn: testTask12LCDControlUnit
     }
   ];
 
