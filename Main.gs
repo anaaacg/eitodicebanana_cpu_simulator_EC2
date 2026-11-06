@@ -38,6 +38,8 @@ function onOpen() {
     .addItem("↺ RESET", "uiReset")
     .addItem("📥 LOAD PROGRAM", "uiLoadProgram")
     .addSeparator()
+    .addItem("📚 OPEN ASM PROGRAM CATALOG", "openProgramCatalog")
+    .addSeparator()
     .addItem("1️⃣ DEMO 1: Arithmetic & Mem", "loadDemo1")
     .addItem("2️⃣ DEMO 2: Loops & Labels", "loadDemo2")
     .addItem("3️⃣ DEMO 3: Keyboard & LCD I/O", "loadDemo3")
