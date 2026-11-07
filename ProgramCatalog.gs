@@ -966,3 +966,214 @@ function refreshTask15Catalog() {
   const programs = refreshProgramCatalogSelector_();
   Logger.log("Catalog updated: " + programs.join(", "));
 }
+
+
+// ============================================================
+// TASK 16 — INTERACTIVE KEYBOARD TO LCD ECHO VERIFICATION
+// ============================================================
+
+function assertTask16_(condition, message) {
+  if (!condition) {
+    throw new Error('TASK 16 ASSERTION FAILED: ' + message);
+  }
+}
+
+function refreshTask16Catalog() {
+  const programs = refreshProgramCatalogSelector_();
+  Logger.log('Catalog updated for Task 16: ' + programs.join(', '));
+  return programs;
+}
+
+/**
+ * Task 16 Verification Suite:
+ * Validates the complete interactive keyboard-to-LCD echo program,
+ * bus communication, En_KBD and Ld_LCD control signals, tri-state buffers,
+ * FIFO order, register updates, and 8x1 LCD video buffer capacity.
+ */
+function testTask16KeyboardLCDEcho() {
+  Logger.log('=== STARTING TASK 16: KEYBOARD TO LCD ECHO PROGRAM TESTS ===');
+
+  const catalog = programCatalogSheet_();
+  const asm = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('ASM');
+  if (!asm) {
+    throw new Error('ASM sheet not found.');
+  }
+
+  // ── TEST 1: Catalog Selection & Availability (CR-1, CR-18) ──
+  const p2 = getCatalogProgramByName_('Program 2 - Keyboard to LCD Echo');
+  assertTask16_(p2 && p2.lines.length > 0, 'CR-18: Program 2 available in ASM catalog.');
+  Logger.log('PASS CR-18: Program 2 found in catalog with ' + p2.lines.length + ' lines.');
+
+  catalog.getRange('D5').setValue(p2.name);
+  loadSelectedCatalogProgramToASM();
+
+  const sourceLines = asm.getRange('D8:D37')
+    .getValues()
+    .map(function(row) { return String(row[0] || ''); });
+
+  const nonBlankSource = sourceLines.filter(function(l) { return l.trim().length > 0; });
+  assertTask16_(
+    nonBlankSource.length === p2.lines.length,
+    'CR-18: Source copied accurately into ASM editor.'
+  );
+
+  // ── TEST 2: Assembly & Syntax Validation (CR-1, CR-15) ──
+  const machineCode = assembleProgram(sourceLines);
+  assertTask16_(
+    machineCode && machineCode.length === 33,
+    'CR-15: Assembled machine code size is 33 bytes (16 2-byte instructions + 1 HLT).'
+  );
+
+  // Verify instruction encoding: IN (05h, reg), OUT (06h, reg), HLT (FFh)
+  assertTask16_(machineCode[0] === 0x05 && machineCode[1] === 0x00, 'CR-2: First instruction is IN AX, [KBD] (05h, 00h).');
+  assertTask16_(machineCode[2] === 0x06 && machineCode[3] === 0x00, 'CR-5: Second instruction is OUT [LCD], AX (06h, 00h).');
+  assertTask16_(machineCode[machineCode.length - 1] === 0xFF, 'CR-1: Last instruction is HLT (FFh).');
+  Logger.log('PASS CR-1, CR-2, CR-5, CR-15: Program assembled without syntax errors with correct opcodes.');
+
+  // ── TEST 3: Virtual Memory Loading & L1I Cache Reset (CR-16, CR-17) ──
+  loadProgram(machineCode, 0x00);
+  assertTask16_(getRegister('PC') === 0x00, 'CR-16: PC initialized to 00h.');
+  const cacheBefore = getCacheState_();
+  assertTask16_(cacheBefore.stats && cacheBefore.stats.l1iHits === 0, 'CR-17: L1I cache reset before execution.');
+  Logger.log('PASS CR-16, CR-17: Machine code loaded into Virtual Code Segment; PC=00h; L1I ready.');
+
+  // ── TEST 4: Peripheral Reset & Keyboard Buffer Enqueue (CR-7, CR-9) ──
+  keyboardReset_();
+  lcdReset_();
+
+  assertTask16_(keyboardQueueSize_() === 0, 'CR-9: Keyboard FIFO is initially empty.');
+  const initialLcd = getLCDStatus();
+  assertTask16_(initialLcd.text.trim().length === 0, 'CR-7: LCD display is initially blank.');
+
+  const testChars = 'EITO2026';
+  testChars.split('').forEach(function(char) {
+    keyboardEnqueueCharacter_(char);
+  });
+  assertTask16_(keyboardQueueSize_() === 8, 'CR-7, CR-9: Keyboard FIFO holds exactly 8 bytes (full capacity).');
+
+  // Verify MMIO read (1F8h - 1FFh)
+  for (let i = 0; i < 8; i++) {
+    const mmioByte = keyboardReadMappedAddress_(0x1F8 + i);
+    assertTask16_(mmioByte === testChars.charCodeAt(i), 'CR-9: MMIO address ' + (0x1F8 + i).toString(16).toUpperCase() + 'h matches entered character.');
+  }
+  Logger.log('PASS CR-7, CR-9: Keyboard 8-byte queue loaded; MMIO 1F8h-1FFh correctly mapped.');
+
+  // ── TEST 5: Step Execution with Signal & Tri-State Monitoring (CR-3, CR-4, CR-8, CR-10, CR-11, CR-12, CR-13, CR-14, CR-19, CR-20) ──
+  let enKbdCount = 0;
+  let ldLcdCount = 0;
+  let state = getExecutionState_();
+  let stepCount = 0;
+  const maxPhases = 2500;
+
+  while (!state.halted && stepCount < maxPhases) {
+    state = stepCpu();
+    stepCount++;
+
+    const lastSignals = state.lastActiveSignals || [];
+    const lastBuses = state.lastBuses;
+
+    // Check En_KBD signal activation during IN
+    if (lastSignals.indexOf('En_KBD') !== -1) {
+      enKbdCount++;
+      // Verify single transmitter rule on internal bus
+      assertTask16_(lastBuses && lastBuses.internal.state === 'ACTIVE', 'CR-10, CR-12: Internal bus is ACTIVE during En_KBD.');
+      assertTask16_(lastBuses.internal.source === 'KEYBOARD', 'CR-11, CR-12: Internal bus transmitter is KEYBOARD.');
+
+      // Verify KBD buffer is ACTIVE, other internal buffers HIGH_Z
+      const signalsObj = {};
+      lastSignals.forEach(function(s) { if (s.indexOf('=') === -1) signalsObj[s] = 1; });
+      const snapshot = buildBusSnapshot_(lastBuses, signalsObj, 1);
+      assertTask16_(snapshot.buffers.internal.KBD === 'ACTIVE', 'CR-12: KBD tri-state buffer is ACTIVE.');
+      assertTask16_(snapshot.buffers.internal.ALU === 'HIGH_Z', 'CR-13: ALU transmitter in HIGH_Z during En_KBD.');
+      assertTask16_(snapshot.buffers.internal.MDR === 'HIGH_Z', 'CR-13: MDR transmitter in HIGH_Z during En_KBD.');
+    }
+
+    // Check Ld_LCD signal activation during OUT
+    if (lastSignals.indexOf('Ld_LCD') !== -1) {
+      ldLcdCount++;
+      // Ld_LCD is receiver, source register is transmitter
+      assertTask16_(lastBuses && lastBuses.internal.state === 'ACTIVE', 'CR-10, CR-12: Internal bus is ACTIVE during Ld_LCD.');
+      const activeRegSource = lastBuses.internal.source;
+      assertTask16_(['AX', 'BX', 'CX', 'DX'].indexOf(activeRegSource) !== -1, 'CR-12: Single active transmitter is register ' + activeRegSource);
+    }
+  }
+
+  assertTask16_(state.halted, 'CR-1: Program reached HLT.');
+  assertTask16_(enKbdCount === 8, 'CR-11: En_KBD activated exactly 8 times (once per character).');
+  assertTask16_(ldLcdCount === 8, 'CR-11: Ld_LCD activated exactly 8 times (once per character).');
+  assertTask16_(keyboardQueueSize_() === 0, 'CR-3: All 8 characters retrieved in FIFO order.');
+  Logger.log('PASS CR-3, CR-4, CR-10, CR-11, CR-12, CR-13: 8 characters transferred via system buses with En_KBD & Ld_LCD.');
+
+  // ── TEST 6: LCD Output and Video Buffer Validation (CR-6, CR-7, CR-9, CR-20) ──
+  const finalLcd = getLCDStatus();
+  assertTask16_(finalLcd.text === 'EITO2026', 'CR-6, CR-20: LCD displays entered characters exactly: EITO2026. Actual: ' + finalLcd.text);
+  assertTask16_(finalLcd.writes === 8, 'CR-7: Exactly 8 writes performed to LCD.');
+
+  // Verify RAM video buffer F8h..FFh directly
+  const ramBuffer = lcdReadBuffer_();
+  for (let i = 0; i < 8; i++) {
+    assertTask16_(ramBuffer[i] === testChars.charCodeAt(i), 'CR-9: RAM video buffer byte ' + i + ' contains ASCII code for ' + testChars[i]);
+  }
+  Logger.log('PASS CR-6, CR-7, CR-9, CR-20: LCD text EITO2026 matches entered characters; RAM F8h-FFh verified.');
+
+  // ── TEST 7: L1I Cache Fetching (CR-17) ──
+  const cacheAfter = getCacheState_();
+  const cStats = cacheAfter.stats || {};
+  assertTask16_(cStats.l1iHits > 0 || cStats.l1iMisses > 0, 'CR-17: Instruction fetching operated through L1I cache.');
+  Logger.log('PASS CR-17: L1I cache accessed during instruction fetching (Hits: ' + cStats.l1iHits + ', Misses: ' + cStats.l1iMisses + ').');
+
+  // ── TEST 8: Live Interactive Single-Character Echo (CR-8) ──
+  keyboardReset_();
+  lcdReset_();
+  loadProgram(machineCode, 0x00);
+
+  // Enqueue 1 character H (72)
+  keyboardEnqueueCharacter_('H');
+  assertTask16_(keyboardQueueSize_() === 1, 'CR-8: 1 character enqueued interactively.');
+
+  // Step until IN AX finishes
+  let guard = 0;
+  while (getRegister('AX') !== 72 && guard < 50) {
+    stepCpu();
+    guard++;
+  }
+  assertTask16_(getRegister('AX') === 72, 'CR-4, CR-8: AX loaded with H (72) from interactive keyboard.');
+  assertTask16_(keyboardQueueSize_() === 0, 'CR-3, CR-8: Keyboard queue empty after interactive IN.');
+
+  // Step until OUT [LCD], AX finishes
+  guard = 0;
+  while (getLCDStatus().text.indexOf('H') === -1 && guard < 50) {
+    stepCpu();
+    guard++;
+  }
+  assertTask16_(getLCDStatus().text.indexOf('H') === 0, 'CR-6, CR-8: Character H rendered on LCD interactively.');
+
+  // Enqueue 2nd character I (73)
+  keyboardEnqueueCharacter_('I');
+  guard = 0;
+  while (getRegister('BX') !== 73 && guard < 50) {
+    stepCpu();
+    guard++;
+  }
+  assertTask16_(getRegister('BX') === 73, 'CR-4, CR-8: BX loaded with I (73) from interactive keyboard.');
+
+  guard = 0;
+  while (getLCDStatus().text.indexOf('HI') === -1 && guard < 50) {
+    stepCpu();
+    guard++;
+  }
+  assertTask16_(getLCDStatus().text.indexOf('HI') === 0, 'CR-6, CR-8: Characters HI rendered on LCD interactively.');
+
+  Logger.log('PASS CR-8: Interactive typing, register load, and immediate LCD display verified.');
+  Logger.log('=== ALL TASK 16 ACCEPTANCE CRITERIA PASSED ===');
+
+  return {
+    passed: true,
+    programName: p2.name,
+    lcdOutput: 'EITO2026',
+    interactiveOutput: 'HI',
+    enKbdActivations: enKbdCount,
+    ldLcdActivations: ldLcdCount,
+    l1iHits: cacheAfter.stats ? cacheAfter.stats.l1iHits : 0
+  };
+}
