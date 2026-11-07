@@ -100,6 +100,36 @@ const PROGRAM_CATALOG_SEED_ = [
       "LOAD DX, [100h]",
       "HLT"
     ]
+  },
+  {
+    id: "TASK17_SCATTERED_MEMORY",
+    name: "Program 4 - Scattered Memory Stress Test",
+    description: "Accesses eight nonconsecutive virtual pages (VPN 8, 10, 12, 14, 9, 11, 13 and 15). Demonstrates Page Faults, FIFO replacement, dirty-page Swap transfers, and L1D/L2 cache misses.",
+    lines: [
+      "; TASK 17 - SCATTERED MEMORY STRESS TEST",
+      "; Nonconsecutive VPN order: 8, 10, 12, 14, 9, 11, 13, 15",
+      "; All addresses use offset 05h within their 32-byte pages.",
+      "; Keyboard MMIO addresses 1F8h-1FFh are not accessed.",
+      "MOV AX, A1h",
+      "STORE [105h], AX",
+      "INC AX",
+      "STORE [145h], AX",
+      "INC AX",
+      "STORE [185h], AX",
+      "INC AX",
+      "STORE [1C5h], AX",
+      "INC AX",
+      "STORE [125h], AX",
+      "INC AX",
+      "STORE [165h], AX",
+      "INC AX",
+      "STORE [1A5h], AX",
+      "INC AX",
+      "STORE [1E5h], AX",
+      "LOAD BX, [105h]",
+      "LOAD DX, [1E5h]",
+      "HLT"
+    ]
   }
 ];
 
