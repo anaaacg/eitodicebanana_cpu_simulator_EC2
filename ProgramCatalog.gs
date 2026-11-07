@@ -1034,7 +1034,7 @@ function testTask16KeyboardLCDEcho() {
   loadProgram(machineCode, 0x00);
   assertTask16_(getRegister('PC') === 0x00, 'CR-16: PC initialized to 00h.');
   const cacheBefore = getCacheState_();
-  assertTask16_(cacheBefore.l1i.hits === 0, 'CR-17: L1I cache reset before execution.');
+  assertTask16_(cacheBefore.stats && cacheBefore.stats.l1iHits === 0, 'CR-17: L1I cache reset before execution.');
   Logger.log('PASS CR-16, CR-17: Machine code loaded into Virtual Code Segment; PC=00h; L1I ready.');
 
   // ── TEST 4: Peripheral Reset & Keyboard Buffer Enqueue (CR-7, CR-9) ──
@@ -1118,8 +1118,9 @@ function testTask16KeyboardLCDEcho() {
 
   // ── TEST 7: L1I Cache Fetching (CR-17) ──
   const cacheAfter = getCacheState_();
-  assertTask16_(cacheAfter.l1i.hits > 0 || cacheAfter.l1i.misses > 0, 'CR-17: Instruction fetching operated through L1I cache.');
-  Logger.log('PASS CR-17: L1I cache accessed during instruction fetching (Hits: ' + cacheAfter.l1i.hits + ', Misses: ' + cacheAfter.l1i.misses + ').');
+  const cStats = cacheAfter.stats || {};
+  assertTask16_(cStats.l1iHits > 0 || cStats.l1iMisses > 0, 'CR-17: Instruction fetching operated through L1I cache.');
+  Logger.log('PASS CR-17: L1I cache accessed during instruction fetching (Hits: ' + cStats.l1iHits + ', Misses: ' + cStats.l1iMisses + ').');
 
   // ── TEST 8: Live Interactive Single-Character Echo (CR-8) ──
   keyboardReset_();
@@ -1173,6 +1174,6 @@ function testTask16KeyboardLCDEcho() {
     interactiveOutput: 'HI',
     enKbdActivations: enKbdCount,
     ldLcdActivations: ldLcdCount,
-    l1iHits: cacheAfter.l1i.hits
+    l1iHits: cacheAfter.stats ? cacheAfter.stats.l1iHits : 0
   };
 }
