@@ -1,4 +1,4 @@
-
+﻿
 /**
  * EitoDiceBanana - UI
  * Phase 1: Visual structure
@@ -381,7 +381,8 @@ function setupASM_() {
   section_(s, "B5:R5", "PROGRAM EDITOR");
 
   s.getRange("B7").setValue("LINE");
-  s.getRange("D7").setValue("ASM INSTRUCTION");
+  s.getRange("D7").setValue("ASM INSTRUCTION (SOURCE)");
+  s.getRange("O7").setValue("MACHINE CODE (HEX)");
 
   for (let i = 0; i < 30; i++) {
     const row = 8 + i;
@@ -390,15 +391,27 @@ function setupASM_() {
 
     s.getRange(row, 4, 1, 10).merge()
       .setBackground(CONFIG.COLORS.panelAlt);
+
+    s.getRange(row, 15, 1, 4).merge()
+      .setBackground(CONFIG.COLORS.panel)
+      .setFontColor(CONFIG.COLORS.yellow)
+      .setHorizontalAlignment("center");
   }
 
-  s.getRange("D8").setValue("MOV AX, 05h");
-  s.getRange("D9").setValue("ADD AX, 03h");
-  s.getRange("D10").setValue("HLT");
+  // Initial default program (Demo 1)
+  s.getRange("D8").setValue("MOV AX, 10h");
+  s.getRange("D9").setValue("MOV BX, 20h");
+  s.getRange("D10").setValue("ADD AX, BX");
+  s.getRange("D11").setValue("STORE [100h], AX");
+  s.getRange("D12").setValue("LOAD DX, [100h]");
+  s.getRange("D13").setValue("HLT");
 
-  section_(s, "B40:R40", "ASSEMBLER STATUS");
+  section_(s, "B40:R40", "ASSEMBLER STATUS & DEMO PROGRAMS");
 
   valueCell_(s, "D42", "NOT LOADED");
+  s.getRange("H42").setValue("DEMO 1: Arithmetic/Mem").setFontColor(CONFIG.COLORS.muted);
+  s.getRange("L42").setValue("DEMO 2: Loop & Labels").setFontColor(CONFIG.COLORS.muted);
+  s.getRange("P42").setValue("DEMO 3: Keyboard/LCD").setFontColor(CONFIG.COLORS.muted);
 }
 
 
