@@ -16,6 +16,15 @@ const PAGING_POLICY = "FIFO";
 const PAGING_EVENT_START_ROW = 28;
 const PAGING_EVENT_COUNT = 10;
 
+// Task 12: Pin physical Frame 7 for the LCD video buffer (F8h-FFh).
+// VPN 7 remains mapped to PFN 7. FIFO can replace only Frames 0-6.
+const PAGING_LCD_PINNED_FRAME = 7;
+
+function isPagingPinnedFrame_(frame) {
+  return frame === PAGING_LCD_PINNED_FRAME;
+}
+
+
 // ------------------------------------------------------------
 // PERSISTENT BACKING STORE
 // ------------------------------------------------------------
@@ -294,6 +303,7 @@ function findFreePhysicalFrame_() {
   );
 
   for (let frame = 0; frame < VM_PHYSICAL_FRAME_COUNT; frame++) {
+    if (isPagingPinnedFrame_(frame)) continue;
     if (!occupied.has(frame)) {
       return frame;
     }
@@ -311,10 +321,12 @@ function findFreePhysicalFrame_() {
  * Reads and writes do not change its FIFO position.
  */
 function selectFIFOVictim_(paging) {
-  const residents = getResidentPages_();
+  const residents = getResidentPages_().filter(function(entry) {
+    return !isPagingPinnedFrame_(entry.pfn);
+  });
 
   if (residents.length === 0) {
-    throw new Error("FIFO cannot select a victim: no resident pages.");
+    throw new Error("FIFO cannot select a victim: no replaceable resident pages.");
   }
 
   residents.sort(function(a, b) {
@@ -512,10 +524,13 @@ function handlePageFault_(faultInfo) {
   let frame = findFreePhysicalFrame_();
   let victim = null;
 
-  // All eight physical frames are occupied.
+  // No replaceable frames are free (Frame 7 is pinned).
   if (frame === -1) {
     victim = selectFIFOVictim_(paging);
     frame = victim.pfn;
+    if (isPagingPinnedFrame_(frame)) {
+      throw new Error("FIFO attempted to evict the LCD-pinned frame.");
+    }
 
     const victimFrame = getPhysicalFrame(frame);
     const victimBytes = victimFrame.bytes.slice();
@@ -570,6 +585,11 @@ function handlePageFault_(faultInfo) {
       frame,
       "Physical frame " + frame + " was free."
     );
+  }
+
+  // Never overwrite the pinned LCD frame during a Page Fault.
+  if (isPagingPinnedFrame_(frame)) {
+    throw new Error("Page Fault attempted to overwrite the LCD video buffer.");
   }
 
   // Read the requested page from Swap or secondary backing storage.
@@ -676,6 +696,8 @@ function getPagingStatistics() {
     swapReads: paging.swapReads,
     residentPages: residents.length,
     freeFrames: VM_PHYSICAL_FRAME_COUNT - residents.length,
+    pinnedFrames: [PAGING_LCD_PINNED_FRAME],
+    replaceableFrameCount: VM_PHYSICAL_FRAME_COUNT - 1,
     residents: residents
   };
 }
@@ -836,4 +858,44 @@ function testTask08PagingModule() {
       Logger.log("Could not refresh dashboard after test restoration.");
     }
   }
+}
+// ------------------------------------------------------------
+// TASK 12: NON-DESTRUCTIVE PINNED-FRAME VALIDATION
+// ------------------------------------------------------------
+
+/**
+ * Run before enabling LCD output. Does not modify RAM or page metadata.
+ * Checks that the physical frame containing F8h-FFh cannot be allocated
+ * as a free frame or selected as a FIFO victim.
+ */
+function testTask12LCDFrameProtection() {
+  if (PAGING_LCD_PINNED_FRAME !== 7 ||
+      LCD_BUFFER_START !== 0xF8 || LCD_BUFFER_END !== 0xFF) {
+    throw new Error("LCD video buffer must use physical F8h-FFh in Frame 7.");
+  }
+
+  const table = getPageTable_();
+  const pinned = table.entries.filter(function(entry) {
+    return entry.present === 1 && entry.pfn === PAGING_LCD_PINNED_FRAME;
+  });
+
+  if (pinned.length !== 1 || pinned[0].vpn !== 7) {
+    throw new Error("VPN 7 must remain resident in pinned PFN 7. Reload the program before testing.");
+  }
+
+  const freeFrame = findFreePhysicalFrame_();
+  if (freeFrame === PAGING_LCD_PINNED_FRAME) {
+    throw new Error("Frame allocator returned pinned Frame 7.");
+  }
+
+  const victim = selectFIFOVictim_(getPagingState_());
+  if (victim.pfn === PAGING_LCD_PINNED_FRAME) {
+    throw new Error("FIFO returned pinned Frame 7.");
+  }
+
+  Logger.log("PASS: LCD Frame 7 is pinned and VPN 7 remains resident.");
+  Logger.log("PASS: Free-frame allocation excludes Frame 7.");
+  Logger.log("PASS: FIFO victim selection excludes Frame 7.");
+  Logger.log("=== ALL TASK 12 LCD FRAME PROTECTION TESTS PASSED ===");
+  return {passed:true, pinnedFrame:7, videoBuffer:"F8h-FFh", fifoVictimPFN:victim.pfn};
 }

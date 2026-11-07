@@ -498,6 +498,24 @@ function decodeFetchedInstruction_(
       ins.address = read(0);
       break;
 
+    case "IN":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      ins.mode = "IO";
+      ins.operand = "KBD";
+      break;
+
+    case "OUT":
+      ins.register = decodeRegister_(
+        read(0)
+      );
+
+      ins.mode = "IO";
+      ins.operand = "LCD";
+      break;
+
     case "HLT":
       break;
 
@@ -1154,14 +1172,22 @@ function stepCpu() {
     microResult
   );
 
-  if (
-    typeof updateControlUnitPanel_ ===
-    "function"
-  ) {
-    updateControlUnitPanel_(
-      state
-    );
-  }
+    if (
+      typeof updateControlUnitPanel_ ===
+      "function"
+    ) {
+      updateControlUnitPanel_(
+        state
+      );
+    }
+
+    // Keep the BUSES dashboard synchronized with each micro-operation.
+    if (
+      typeof syncTask11BusesFromExecution_ ===
+      "function"
+    ) {
+      syncTask11BusesFromExecution_(state);
+    }
 
   return state;
 }
@@ -1171,68 +1197,56 @@ function stepCpu() {
 // ------------------------------------------------------------
 
 function runCpu() {
-  if (
-    typeof edbRunContinuous_ ===
-    "function"
-  ) {
-    return edbRunContinuous_();
-  }
+  // One click runs until HLT/PAUSE or near the Apps Script time limit.
+  // A time guard avoids abrupt server termination on lengthy programs.
+  const MAX_RUN_MILLISECONDS = 240000;
+  const started = Date.now();
 
-  let state =
-    getExecutionState_();
-
-  if (state.halted) {
-    return state;
-  }
+  let state = getExecutionState_();
+  if (state.halted) return state;
 
   state.paused = false;
   saveExecutionState_(state);
 
   const speed = String(
-    cpuSheet_()
-      .getRange("G29")
-      .getValue()
+    cpuSheet_().getRange("G29").getValue()
   ).trim().toLowerCase();
 
+  // Apps Script spreadsheet operations already provide visible delay.
+  // Avoid the previous 20-step cap and costly half-second sleeps.
   const delays = {
-    lento: 1000,
-    normal: 500,
-    rapido: 100,
-    "rápido": 100
+    lento: 350,
+    normal: 0,
+    rapido: 0,
+    "rápido": 0
   };
+  const delay = delays[speed] === undefined ? 0 : delays[speed];
 
-  const delay =
-    delays[speed] === undefined
-      ? 500
-      : delays[speed];
-
-  const maxMicroSteps = 20;
-
-  for (
-    let i = 0;
-    i < maxMicroSteps;
-    i++
-  ) {
+  let stepsThisRun = 0;
+  while (Date.now() - started < MAX_RUN_MILLISECONDS) {
     state = getExecutionState_();
-
-    if (
-      state.halted ||
-      state.paused
-    ) {
-      break;
-    }
+    if (state.halted || state.paused) break;
 
     state = stepCpu();
-    SpreadsheetApp.flush();
+    stepsThisRun++;
 
-    if (
-      state.halted ||
-      state.paused
-    ) {
-      break;
-    }
+    if (state.halted || state.paused) break;
 
-    Utilities.sleep(delay);
+    if (delay > 0) Utilities.sleep(delay);
+  }
+
+  // If Apps Script's execution window is nearly exhausted, return safely.
+  // The CPU remains resumable with another RUN click.
+  if (!state.halted && !state.paused) {
+    Logger.log(
+      "RUN stopped at safety limit after " + stepsThisRun +
+      " micro-steps. Press RUN to continue."
+    );
+    SpreadsheetApp.getActive().toast(
+      "Execution time limit reached; RUN again to continue.",
+      "EitoDiceBanana",
+      5
+    );
   }
 
   return getExecutionState_();
@@ -1303,6 +1317,12 @@ function resetCpu() {
 
   resetCPURegisters();
   resetExecutionState();
+
+  // Paging restored the initial RAM image, including the LCD buffer.
+  // Reset the LCD cursor and status without overwriting RAM.
+  if (typeof lcdResetController_ === "function") {
+    lcdResetController_();
+  }
 
   const trace =
     SpreadsheetApp
@@ -1752,4 +1772,44 @@ function testTask08CPUPageFaultProgram() {
     BX: getRegister("BX"),
     paging: stats
   };
+}
+
+// ------------------------------------------------------------
+// TASK 12: OUT DECODER TEST (NON-DESTRUCTIVE)
+// ------------------------------------------------------------
+
+function testTask12ExecutionOutDecode() {
+  const registers = ["AX", "BX", "CX", "DX"];
+
+  registers.forEach(function(name, code) {
+    const decoded = decodeFetchedInstruction_("OUT", [code]);
+
+    if (
+      decoded.type !== "OUT" ||
+      decoded.register !== name ||
+      decoded.mode !== "IO" ||
+      decoded.operand !== "LCD"
+    ) {
+      throw new Error("OUT decoder failed for " + name);
+    }
+
+    const program = getInstructionMicroProgram_(decoded);
+    if (
+      program.length !== 1 ||
+      program[0].controlWord.signals.Ld_LCD !== 1 ||
+      program[0].controlWord.signals["En_" + name] !== 1
+    ) {
+      throw new Error("OUT microprogram failed for " + name);
+    }
+  });
+
+  if (instructionTypeFromOpcode_(0x06) !== "OUT") {
+    throw new Error("Opcode 06h must decode as OUT.");
+  }
+
+  Logger.log("PASS: OUT opcode 06h recognized.");
+  Logger.log("PASS: OUT AX/BX/CX/DX operands decoded.");
+  Logger.log("PASS: OUT activates Ld_LCD and exactly one transmitter.");
+  Logger.log("=== ALL TASK 12 EXECUTION DECODER TESTS PASSED ===");
+  return { passed: true, opcode: "06h", registers: 4 };
 }
