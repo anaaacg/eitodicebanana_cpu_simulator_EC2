@@ -39,10 +39,13 @@ function onOpen() {
     .addItem("📥 LOAD PROGRAM", "uiLoadProgram")
     .addSeparator()
     .addItem("📚 OPEN ASM PROGRAM CATALOG", "openProgramCatalog")
+    .addItem("🔄 REFRESH ASM CATALOG", "refreshTask16Catalog")
     .addSeparator()
     .addItem("1️⃣ DEMO 1: Arithmetic & Mem", "loadDemo1")
     .addItem("2️⃣ DEMO 2: Loops & Labels", "loadDemo2")
     .addItem("3️⃣ DEMO 3: Keyboard & LCD I/O", "loadDemo3")
+    .addSeparator()
+    .addItem("⌨️ TEST TASK 16: Keyboard -> LCD Echo", "testTask16KeyboardLCDEcho")
     .addToUi();
 }
 
