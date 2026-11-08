@@ -682,6 +682,13 @@ function clearRAM() {
     MEMORY_HIGHLIGHT_KEY
   );
 
+  // RAM reset also resets the metadata for the physical keyboard FIFO.
+  // keyboardReset_ rewrites E8h-EFh as zero and leaves the LCD controller
+  // state independent from the keyboard queue.
+  if (typeof keyboardReset_ === "function") {
+    keyboardReset_();
+  }
+
   setupMemoryAccessPanel();
 }
 

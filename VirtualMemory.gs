@@ -309,6 +309,17 @@ function translateVirtualAddress(virtualAddress, isWrite) {
 }
 
 // ------------------------------------------------------------
+// RESERVED PERIPHERAL PHYSICAL WINDOWS (PINNED FRAME 7)
+// ------------------------------------------------------------
+
+function isReservedPeripheralPhysicalAddress_(physicalAddress) {
+  return Number.isInteger(physicalAddress) && (
+    (physicalAddress >= 0xE8 && physicalAddress <= 0xEF) ||
+    (physicalAddress >= 0xF8 && physicalAddress <= 0xFF)
+  );
+}
+
+// ------------------------------------------------------------
 // VIRTUAL MEMORY READ / WRITE
 // ------------------------------------------------------------
 
@@ -412,6 +423,17 @@ function writeVirtualMemory(virtualAddress, value) {
     );
   }
 
+  // The initial VPN 7 -> PFN 7 mapping exposes these physical I/O windows
+  // at the same virtual offsets. Reject direct aliases before marking the
+  // page-table entry dirty.
+  if ((virtualAddress >= 0x0E8 && virtualAddress <= 0x0EF) ||
+      (virtualAddress >= 0x0F8 && virtualAddress <= 0x0FF)) {
+    throw new Error(
+      "Virtual addresses 0E8h-0EFh (keyboard) and 0F8h-0FFh (LCD) " +
+      "are reserved peripheral buffers and cannot be written as normal RAM."
+    );
+  }
+
   let translation = translateVirtualAddress(
     virtualAddress,
     true
@@ -434,6 +456,17 @@ function writeVirtualMemory(virtualAddress, value) {
   if (!translation.success || translation.fault) {
     throw new Error(
       translation.message || "Virtual memory write failed."
+    );
+  }
+
+  // VPN 7 is permanently mapped to pinned PFN 7. Protect both peripheral
+  // windows even when reached through ordinary virtual page-7 addresses
+  // (0E8h-0EFh and 0F8h-0FFh), not only through keyboard MMIO aliases.
+  if (isReservedPeripheralPhysicalAddress_(translation.physicalAddress)) {
+    throw new Error(
+      "Physical address " + translation.physicalAddress.toString(16).toUpperCase() +
+      "h belongs to a reserved keyboard/LCD peripheral buffer and is read-only " +
+      "through normal virtual memory writes."
     );
   }
 
