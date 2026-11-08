@@ -505,6 +505,14 @@ function loadProgram(program, startAddress) {
     throw new Error("Program exceeds virtual code segment 00h-7Fh (length: " + program.length + " bytes).");
   }
 
+  // Keyboard FIFO contents now live in physical RAM E8h-EFh. Preserve the
+  // pending input while the RAM image is rebuilt, matching the previous
+  // behavior where the queue survived loadProgram().
+  const keyboardQueueBeforeLoad =
+    typeof getKeyboardQueue_ === "function"
+      ? getKeyboardQueue_()
+      : null;
+
   program.forEach(function(byte, index) {
     if (!isValidByte(byte)) {
       throw new Error("Invalid byte at index " + index + ": " + byte);
@@ -541,6 +549,14 @@ function loadProgram(program, startAddress) {
   ram.getRange("B6:Q21")
     .setNumberFormat("@")
     .setValues(matrix);
+
+  // Restore the FIFO bytes before paging snapshots Frame 7.
+  if (keyboardQueueBeforeLoad !== null &&
+      typeof keyboardSaveQueueRaw_ === "function") {
+    keyboardWithLock_(function() {
+      keyboardSaveQueueRaw_(keyboardQueueBeforeLoad);
+    });
+  }
 
   SpreadsheetApp.flush();
   clearMemoryHighlight();

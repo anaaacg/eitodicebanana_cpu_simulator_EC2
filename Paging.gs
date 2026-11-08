@@ -16,8 +16,9 @@ const PAGING_POLICY = "FIFO";
 const PAGING_EVENT_START_ROW = 28;
 const PAGING_EVENT_COUNT = 10;
 
-// Task 12: Pin physical Frame 7 for the LCD video buffer (F8h-FFh).
-// VPN 7 remains mapped to PFN 7. FIFO can replace only Frames 0-6.
+// Pin physical Frame 7 for I/O buffers: keyboard FIFO E8h-EFh and
+// LCD video buffer F8h-FFh. VPN 7 remains mapped to PFN 7.
+// FIFO can replace only Frames 0-6.
 const PAGING_LCD_PINNED_FRAME = 7;
 
 function isPagingPinnedFrame_(frame) {
@@ -870,8 +871,9 @@ function testTask08PagingModule() {
  */
 function testTask12LCDFrameProtection() {
   if (PAGING_LCD_PINNED_FRAME !== 7 ||
-      LCD_BUFFER_START !== 0xF8 || LCD_BUFFER_END !== 0xFF) {
-    throw new Error("LCD video buffer must use physical F8h-FFh in Frame 7.");
+      LCD_BUFFER_START !== 0xF8 || LCD_BUFFER_END !== 0xFF ||
+      KEYBOARD_PHYSICAL_START !== 0xE8 || KEYBOARD_PHYSICAL_END !== 0xEF) {
+    throw new Error("Frame 7 must reserve keyboard E8h-EFh and LCD F8h-FFh buffers.");
   }
 
   const table = getPageTable_();
@@ -893,7 +895,7 @@ function testTask12LCDFrameProtection() {
     throw new Error("FIFO returned pinned Frame 7.");
   }
 
-  Logger.log("PASS: LCD Frame 7 is pinned and VPN 7 remains resident.");
+  Logger.log("PASS: Frame 7 is pinned; keyboard E8h-EFh and LCD F8h-FFh are reserved.");
   Logger.log("PASS: Free-frame allocation excludes Frame 7.");
   Logger.log("PASS: FIFO victim selection excludes Frame 7.");
   Logger.log("=== ALL TASK 12 LCD FRAME PROTECTION TESTS PASSED ===");
