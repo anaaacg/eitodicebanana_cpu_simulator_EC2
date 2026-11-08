@@ -4,13 +4,18 @@
  *
  * FIFO keyboard queue: 8 bytes.
  * Virtual MMIO addresses: 1F8h - 1FFh.
- * The peripheral does not consume physical RAM frames.
+ * Physical FIFO storage: E8h - EFh (Frame 7, pinned).
+ * DocumentProperties stores only the FIFO count; bytes live in RAM.
  */
 
 const KEYBOARD_QUEUE_KEY = "EDB_KEYBOARD_QUEUE";
 const KEYBOARD_QUEUE_CAPACITY = 8;
 const KEYBOARD_MMIO_START = 0x1F8;
 const KEYBOARD_MMIO_END = 0x1FF;
+const KEYBOARD_PHYSICAL_START = 0xE8;
+const KEYBOARD_PHYSICAL_END = 0xEF;
+const KEYBOARD_QUEUE_COUNT_KEY = "EDB_KEYBOARD_QUEUE_COUNT";
+const KEYBOARD_RESERVED_FRAME = 7;
 
 // ------------------------------------------------------------
 // QUEUE STORAGE
@@ -28,35 +33,69 @@ function keyboardWithLock_(callback) {
 }
 
 function keyboardReadQueueRaw_() {
-  const raw = PropertiesService
-    .getDocumentProperties()
-    .getProperty(KEYBOARD_QUEUE_KEY);
+  const props = PropertiesService.getDocumentProperties();
+  const countRaw = props.getProperty(KEYBOARD_QUEUE_COUNT_KEY);
 
-  if (!raw) return [];
+  // Migration path for projects that still have the previous JSON FIFO
+  // stored in DocumentProperties. The bytes are copied into physical RAM
+  // exactly once; thereafter RAM is the canonical queue storage.
+  if (countRaw === null) {
+    const legacyRaw = props.getProperty(KEYBOARD_QUEUE_KEY);
+    let legacyQueue = [];
 
-  try {
-    const queue = JSON.parse(raw);
-
-    if (!Array.isArray(queue)) return [];
-
-    if (queue.some(value => !isValidByte(value))) {
-      return [];
+    if (legacyRaw) {
+      try {
+        const parsed = JSON.parse(legacyRaw);
+        if (Array.isArray(parsed) &&
+            parsed.every(value => isValidByte(value))) {
+          legacyQueue = parsed.slice(0, KEYBOARD_QUEUE_CAPACITY);
+        }
+      } catch (error) {
+        legacyQueue = [];
+      }
     }
 
-    return queue.slice(0, KEYBOARD_QUEUE_CAPACITY);
+    keyboardWriteQueueToRAM_(legacyQueue);
+    props.setProperty(KEYBOARD_QUEUE_COUNT_KEY, String(legacyQueue.length));
+    props.deleteProperty(KEYBOARD_QUEUE_KEY);
+    return legacyQueue;
+  }
 
-  } catch (error) {
+  const count = Number(countRaw);
+  if (!Number.isInteger(count) || count < 0 || count > KEYBOARD_QUEUE_CAPACITY) {
+    keyboardWriteQueueToRAM_([]);
+    props.setProperty(KEYBOARD_QUEUE_COUNT_KEY, "0");
     return [];
+  }
+
+  const queue = [];
+  for (let i = 0; i < count; i++) {
+    queue.push(readRawMemory_(KEYBOARD_PHYSICAL_START + i));
+  }
+  return queue;
+}
+
+function keyboardWriteQueueToRAM_(queue) {
+  if (!Array.isArray(queue) || queue.length > KEYBOARD_QUEUE_CAPACITY ||
+      queue.some(value => !isValidByte(value))) {
+    throw new Error("Invalid keyboard FIFO contents.");
+  }
+
+  for (let i = 0; i < KEYBOARD_QUEUE_CAPACITY; i++) {
+    Write(KEYBOARD_PHYSICAL_START + i, i < queue.length ? queue[i] : 0);
+  }
+
+  if (typeof invalidateCachePhysicalFrame === "function") {
+    invalidateCachePhysicalFrame(KEYBOARD_RESERVED_FRAME);
   }
 }
 
 function keyboardSaveQueueRaw_(queue) {
-  PropertiesService
-    .getDocumentProperties()
-    .setProperty(
-      KEYBOARD_QUEUE_KEY,
-      JSON.stringify(queue)
-    );
+  keyboardWriteQueueToRAM_(queue);
+  const props = PropertiesService.getDocumentProperties();
+  props.setProperty(KEYBOARD_QUEUE_COUNT_KEY, String(queue.length));
+  // Remove the legacy payload key: FIFO bytes now live only in physical RAM.
+  props.deleteProperty(KEYBOARD_QUEUE_KEY);
 }
 
 function getKeyboardQueue_() {
@@ -171,10 +210,9 @@ function keyboardReadMappedAddress_(address) {
     );
   }
 
-  const queue = getKeyboardQueue_();
   const index = address - KEYBOARD_MMIO_START;
-
-  return index < queue.length ? queue[index] : 0;
+  const physicalAddress = KEYBOARD_PHYSICAL_START + index;
+  return readRawMemory_(physicalAddress);
 }
 
 // ------------------------------------------------------------
@@ -227,7 +265,7 @@ function updateKeyboardPanel_() {
     const value = occupied ? queue[i] : 0;
 
     const address = (
-      KEYBOARD_MMIO_START + i
+      KEYBOARD_PHYSICAL_START + i
     ).toString(16)
       .toUpperCase()
       .padStart(3, "0") + "h";
@@ -331,7 +369,7 @@ function setupKeyboardPanel() {
   sheet.getRange("B10:R10")
     .merge()
     .setValue(
-      "FIFO QUEUE | 8 BYTES | VIRTUAL MMIO: 1F8h - 1FFh | READ ONLY"
+      "FIFO QUEUE | 8 BYTES | RAM: E8h - EFh | VIRTUAL MMIO: 1F8h - 1FFh | READ ONLY"
     )
     .setBackground(C.panelAlt)
     .setFontColor(C.yellow)
@@ -341,7 +379,7 @@ function setupKeyboardPanel() {
   sheet.getRange("B12:F12")
     .setValues([[
       "SLOT",
-      "VIRTUAL ADDRESS",
+      "PHYSICAL RAM",
       "BYTE (HEX)",
       "DECIMAL",
       "CHARACTER"
@@ -361,7 +399,8 @@ function setupKeyboardPanel() {
     .merge()
     .setValue(
       "IN reg, [KBD] consumes the next FIFO byte through En_KBD. " +
-      "The MMIO window does not occupy physical RAM."
+      "The virtual MMIO window 1F8h-1FFh aliases physical RAM E8h-EFh " +
+      "inside pinned Frame 7; DocumentProperties stores only FIFO count."
     )
     .setFontColor(C.muted)
     .setWrap(true);
@@ -500,6 +539,20 @@ function testKeyboardModule() {
     );
   }
 
+  // The virtual MMIO alias must expose the same first physical FIFO byte.
+  assertKeyboard_(
+    readVirtualMemory(KEYBOARD_MMIO_START) === 0x41,
+    "Virtual MMIO 1F8h must alias physical FIFO byte E8h."
+  );
+
+  // Verify the FIFO bytes are physically stored in Frame 7 (E8h-EFh).
+  for (let i = 0; i < 8; i++) {
+    assertKeyboard_(
+      readRawMemory_(KEYBOARD_PHYSICAL_START + i) === 0x41 + i,
+      "FIFO byte is not stored in physical RAM at slot " + i
+    );
+  }
+
   // Verify FIFO order.
   for (let i = 0; i < 8; i++) {
     const value = keyboardDequeue_();
@@ -514,6 +567,13 @@ function testKeyboardModule() {
     keyboardQueueSize_() === 0,
     "Queue must be empty after eight removals."
   );
+
+  for (let i = 0; i < 8; i++) {
+    assertKeyboard_(
+      readRawMemory_(KEYBOARD_PHYSICAL_START + i) === 0,
+      "Dequeued FIFO slot must be cleared in physical RAM."
+    );
+  }
 
   // Empty queue must be handled.
   let emptyRejected = false;
@@ -534,6 +594,25 @@ function testKeyboardModule() {
     keyboardReadMappedAddress_(0x1F8) === 0,
     "Empty MMIO slot must return 00h."
   );
+
+  // Normal virtual writes must not corrupt the physical keyboard/LCD buffers.
+  let keyboardWriteRejected = false;
+  try {
+    writeVirtualMemory(0x0E8, 0x55);
+  } catch (error) {
+    keyboardWriteRejected = /reserved|peripheral/i.test(error.message);
+  }
+  assertKeyboard_(keyboardWriteRejected,
+    "Virtual RAM writes must not overwrite the keyboard FIFO buffer.");
+
+  let lcdWriteRejected = false;
+  try {
+    writeVirtualMemory(0x0F8, 0x55);
+  } catch (error) {
+    lcdWriteRejected = /reserved|peripheral/i.test(error.message);
+  }
+  assertKeyboard_(lcdWriteRejected,
+    "Virtual RAM writes must not overwrite the LCD buffer.");
 
   // Verify assembler encoding.
   const encoded = assembleInstruction(
